@@ -5,9 +5,6 @@ use strict;
 use Tk;
 use Tk::BrowseEntry;
 use ZooZ::Forms;
-use ZooZ::TiedVar;
-
-#use Tk::chooseColor;
 
 # I need to get the height of an optionmenu widget.
 # this will be the height we configure the rows to be at.
@@ -26,8 +23,10 @@ our %options = ( # generics
 		-bitmap             => ['Image'],
 		-borderwidth        => ['Integer', 'positive'],
 		-command            => ['Callback'],
+		-compound           => ['TBD'],
 		-cursor             => ['Image'],
 		#-dash              => [],
+		-default            => ['TBD'],
 		-disabledforeground => ['Color'],
 		-disabledtile       => ['Image'],
 		-exportselection    => ['Boolean'],
@@ -38,6 +37,7 @@ our %options = ( # generics
 		-highlightcolor     => ['Color'],
 		-highlightthickness => ['Integer', 'positive'],
 		-image              => ['Image'],
+		-indicatoron        => ['Boolean'],
 		-insertbackground   => ['Color'],
 		-insertborderwidth  => [qw/Integer positive/],
 		-insertofftime      => [qw/Integer positive/],
@@ -49,6 +49,8 @@ our %options = ( # generics
 		-justify            => [qw/List left right center/],
 		-minsize            => [qw/Integer positive/],  # for gridConfigure
 		-offset             => [qw/List n s e w ne se sw nw center/],
+		-offvalue           => ['String'],
+		-onvalue            => ['String'],
 		-orient             => [qw/List horizontal vertical/],
 		-pad                => [qw/Integer positive/],  # for gridConfigure
 		-padx               => [qw/Integer positive/],
@@ -58,7 +60,9 @@ our %options = ( # generics
 		-repeatinterval     => [qw/Integer positive/],
 		-selectbackground   => ['Color'],
 		-selectborderwidth  => [qw/Integer positive/],
+		-selectcolor        => ['Color'],
 		-selectforeground   => ['Color'],
+		-selectimage        => ['Image'],
 		-setgrid            => ['Boolean'],
 		-state              => [qw/List normal disabled/],
 		-takefocus          => ['Boolean'],
@@ -68,7 +72,8 @@ our %options = ( # generics
 		-troughColor        => ['Color'],
 		-troughtile         => ['Image'],
 		-underline          => [qw/Integer positive/],
-		#-weight             => [qw/Integer positive/],  # for gridConfigure
+		-value              => ['String'],
+		-variable           => ['VarRef'],
 		-weight             => [Hash =>
 					'Not Greedy'        => 0,
 					'A Little Greedy'   => 1,
@@ -77,8 +82,8 @@ our %options = ( # generics
 					'Ebenezer Scrooge'  => 4],
 		-width              => [qw/Integer positive/],
 		-wraplength         => [qw/Integer positive/],
-		-xscrollcommand     => ['Callback'],
-		-yscrollcommand     => ['Callback'],
+#		-xscrollcommand     => ['Callback'],
+#		-yscrollcommand     => ['Callback'],
 	       );
 
 
@@ -93,22 +98,32 @@ our %options = ( # generics
 # 2. option text to use in the label.
 # 3. frame to add stuff to.
 # 4. row to add stuff to.
-# 5. var ref to save result to.
-# 6. additional args that depend on type of option.
-#    for -font, $args[0] is a ZooZ::Fonts object.
+# 5. col to add stuff to.
+# 6. var ref to save result to.
+# 7. additional args that depend on type of option.
+#    for -font,     $args[0] is a ZooZ::Fonts object.
+#    for Callbacks, $args[0] is a ZooZ::Callbacks object.
 
 sub addOptionGrid {
-  my ($class, $option, $optionLabel, $frame, $row, $ref, @args) = @_;
+  my ($class,
+      $option,
+      $optionLabel,
+      $frame,
+      $row,
+      $col,
+      $ref,
+      @args) = @_;
 
   unless (exists $options{$option}) {
     # hmmm .. should change this to some default. Just an entry.
-    #print "ERROR: option '$option' is unknown!\n";
+    # TBD
     return undef;
   }
 
   unless ($maxHeight) { # this feels like a hack.
-    my $om     = $frame->Optionmenu;
-    $maxHeight = $om->reqheight;
+    #my $om     = $frame->Optionmenu;
+    my $om     = $frame->Button(-pady => 0);
+    $maxHeight = $om   ->reqheight;
     $om->destroy;
   }
 
@@ -116,23 +131,19 @@ sub addOptionGrid {
   my $type = shift @list;
 
   my $label = $frame->Label(-text          => $optionLabel,
-			    #-relief        => 'groove',
-			    #-borderwidth   => 1,
 			    -anchor        => 'w',
-			    #-bg            => 'white',
-			   )->grid(-column => 0,
+			    -font          => 'OptionText',
+			   )->grid(-column => $col,
 				   -row    => $row,
 				   -sticky => 'ewns',
 				  );
 
-  my $entry;
-
   if ($type eq 'Color') {
-    $entry = $frame->Entry(-textvariable => $ref,
-			  )->grid(-column => 1,
-				  -row    => $row,
-				  -sticky => 'ew',
-				 );
+    $frame->Entry(-textvariable  => $ref,
+		 )->grid(-column => $col + 1,
+			 -row    => $row,
+			 -sticky => 'ew',
+			);
     my $b;
     $b = $frame->Button(
 			-bitmap  => 'transparent',
@@ -140,17 +151,78 @@ sub addOptionGrid {
 			-command => [\&_chooseColor, $frame, $ref, \$b],
 			-height  => 9,
 			-width   => 9,
-		       )->grid(-column => 2,
+		       )->grid(-column => $col + 2,
 			       -row    => $row,
 			       -padx   => 1,
 			       -sticky => 'ew',
 			 );
 
   } elsif ($type eq 'Image') {
+    my $types;
+    if ($optionLabel eq '-image') {
+      $types = [
+		['GIF Files',    '.gif'],
+		['PGM Files',    '.pgm'],
+		['PPM Files',    '.ppm'],
+		['Bitmap Files', '.bmp'],
+		['Pixmap Files', '.xpm'],
+		['All Files',    '*'   ],
+	       ];
+    } elsif ($optionLabel eq '-bitmap') {
+      $types = [
+		['Bitmap Files', '.bmp'],
+		['All Files', '*'   ],
+	       ];
+    } else {
+      $types = [
+		['GIF Files',    '.gif'],
+		['PGM Files',    '.pgm'],
+		['PPM Files',    '.ppm'],
+		['Bitmap Files', '.bmp'],
+		['Pixmap Files', '.xpm'],
+		['All Files',    '*'   ],
+	       ];
+    }
+
+    my $file;
+    $frame->Entry(-textvariable       => \$file,
+		  -state              => 'disabled',
+		  -disabledforeground => 'black',
+		 )->grid(-column => $col + 1,
+			 -row    => $row,
+			 -sticky => 'ew',
+			);
+    $frame->Button(-text    => '...',
+		   -padx    => 0,
+		   -pady    => 0,
+		   -command => sub {
+		     my $ans = $frame->getOpenFile(-title     => 'Select Image',
+						   -filetypes => $types);
+		     return unless $ans;
+		     $file = $ans;
+
+		     my $type;
+		     if      ($file =~ /\.(?:gif|pgm|ppm)$/) {
+		       $type = 'Photo';
+		     } elsif ($file =~ /\.bmp$/) {
+		       $type = 'Bitmap';
+		     } elsif ($file =~ /\.xpm$/) {
+		       $type = 'Pixmap';
+		     } else { # reset
+		       $$ref = 'image-zooz';
+		       return;
+		     }
+		     $$ref = $frame->$type(-file => $file);
+		   })->grid(-column => $col + 2,
+			    -row    => $row,
+			    -padx   => 1,
+			    -sticky => 'ew',
+			   );
+
   } elsif ($type eq 'Hash') {
     my $key = $list[0];
-    $$ref = $list[1];
-    my %h = @list;
+    $$ref   = $list[1];
+    my %h   = @list;
 
     my $e = $frame->BrowseEntry(
 				-choices            => [sort {$h{$a} <=> $h{$b}} keys %h],
@@ -158,57 +230,56 @@ sub addOptionGrid {
 				-variable           => \$key,
 				-disabledforeground => 'black',
 				-browsecmd          => sub { $$ref = $h{$key} },
-		       )->grid(-column     => 1,
-			       -row        => $row,
-			       -columnspan => 2,
-			       -sticky     => 'ew',
-			      );
+			       )->grid(-column     => $col + 1,
+				       -row        => $row,
+				       -columnspan => 2,
+				       -sticky     => 'ew',
+				      );
 
   } elsif ($type eq 'List') {
     my $e = $frame->BrowseEntry(
-				-choices  => [@list],
-				-state    => 'readonly',
-				-variable => $ref,
+				-choices            => [@list],
+				-state              => 'readonly',
+				-variable           => $ref,
 				-disabledforeground => 'black',
-				#-bg => 'red',
-		       )->grid(-column     => 1,
-			       -row        => $row,
-			       -columnspan => 2,
-			       -sticky     => 'ew',
-			      );
+			       )->grid(-column     => $col + 1,
+				       -row        => $row,
+				       -columnspan => 2,
+				       -sticky     => 'ew',
+				      );
 
   } elsif ($type eq 'Integer') {
     my $pos = shift @list || 0;
     my $rgx = $pos ? qr/^\d$/ : qr/^(?:-|\d|\.)$/;
 
     $frame->Entry(
-		  -textvariable      => $ref,
+		  -textvariable    => $ref,
 		  -validate        => 'key',
 		  -validatecommand => sub {
 		    return 1 unless $_[4] == 1;
 		    return 0 unless $_[1] =~ /$rgx/;
 		    return 1;
 		  },
-		 )->grid(-column     => 1,
+		 )->grid(-column     => $col + 1,
 			 -row        => $row,
 			 -columnspan => 2,
 			 -sticky     => 'ew',
 			);
 
   } elsif ($type eq 'String') {
-    $entry = $frame->Entry(
-			   -textvariable      => $ref,
-			  )->grid(-column     => 1,
-				  -row        => $row,
-				  -columnspan => 2,
-				  -sticky     => 'ew',
-				 );
+    $frame->Entry(
+		  -textvariable      => $ref,
+		 )->grid(-column     => $col + 1,
+			 -row        => $row,
+			 -columnspan => 2,
+			 -sticky     => 'ew',
+			);
 
   } elsif ($type eq 'Boolean') {
     $frame->Checkbutton(-text     => 'On/Off',
 			-variable => $ref,
 			-anchor   => 'w',
-		       )->grid(-column     => 1,
+		       )->grid(-column     => $col + 1,
 			       -row        => $row,
 			       -columnspan => 2,
 			       -sticky     => 'ew',
@@ -217,25 +288,70 @@ sub addOptionGrid {
   } elsif ($type eq 'Font') {
     $$ref ||= 'Default';
     my $b;
-    $b = $frame->Button(#-textvariable => $ref,  # this causes a core dump at app exit!
-			-text         => 'Select Font',
+    $b = $frame->Button(
+			-text         => 'Change Font',
 			-font         => $$ref,
+			-pady         => 0,
 			-command      => sub {
-			  ZooZ::Forms->Fonts($frame, $args[0], $ref);
-
-			  $$ref or return $$ref = 'Default';
-
-			  $b->configure(-font => $$ref);
-			})->grid(-column     => 1,
+			  my $f = ZooZ::Forms->chooseFont;
+			  if ($f) {
+			    $$ref = $f;
+			    $b->configure(-font => $f);
+			  }
+			})->grid(-column     => $col + 1,
 				 -row        => $row,
 				 -columnspan => 2,
 				 -sticky     => 'ew',
 				);
 
   } elsif ($type eq 'Callback') {
-    # TBD
+    $$ref = 'Select Callback' unless $$ref;
+    my $b;
+
+    $b = $frame->Button(-text         => $$ref,
+			-pady         => 0,
+			-command      => sub {
+			  my $cb = ZooZ::Forms->chooseCallback;
+			  return unless $cb;
+
+			  $b->configure(-text => '\&' . $cb);
+			  $$ref = eval "\\&$cb";
+
+			  $::CALLBACKOBJ->name2code($cb, $$ref);
+			},
+		       )->grid(-column     => $col + 1,
+			       -row        => $row,
+			       -columnspan => 2,
+			       -sticky     => 'ew',
+			      );
+
   } elsif ($type eq 'VarRef') {
-    # TBD
+    $$ref = 'Select Variable' unless $$ref;
+    my $b;
+
+    $b = $frame->Button(-text    => $$ref,
+			-pady    => 0,
+			-command => sub {
+			  my $vr = ZooZ::Forms->chooseVar;
+			  return unless $vr;
+
+			  $b->configure(-text => "\\" . $vr);
+
+			  my $cp = $vr;
+			  # create the var
+			  {
+			    $vr =~ s/^.//;
+			    no strict;
+			    $$ref = \${"main::$vr"};
+			  }
+
+			  $::VARREFOBJ->name2ref($cp, $$ref);
+
+			})->grid(-column     => $col + 1,
+				 -row        => $row,
+				 -columnspan => 2,
+				 -sticky     => 'ew',
+				);
   }
 
   # configure the row to make it look nice.
@@ -252,27 +368,6 @@ sub _chooseColor {
 
   $$ref = $color;
   $$b->configure(-bg => $color);
-}
-
-{
-  my $form;
-
-  sub _chooseCB {
-    my ($f) = @_;
-
-    unless ($form) {
-      my $t = $form = $f->Toplevel;
-      $t->withdraw;
-      $t->title('Choose Callback');
-      $t->protocol(WM_DELETE_WINDOW => sub {
-		     $t->withdraw;
-		     return undef;
-		   });
-
-      $t->LabFrame();
-    }
-    $form->deiconify;
-  }
 }
 
 1;

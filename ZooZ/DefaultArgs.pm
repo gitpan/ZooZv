@@ -27,15 +27,32 @@ our %defaultWidgetArgs = (
 			    my $n = shift;
 			    return {-text     => $n };
 			  },
-			  'LabFrame' => sub {
-			    my $n = shift;
-			    return {-text     => $n };
-			  },
+			  Frame        => sub {  # Pane .. really
+			    return {
+				    #-gridded => 'xy',
+				    -sticky  => 'nsew',
+				    -width   => 200,
+				    -height  => 200,
+				   },
+				  },
 			 );
 
-sub getDefaults {
+our %defaultPlacementArgs = (
+			     Frame => {
+				       -sticky => 'nsew',
+				      },
+			    );
+
+sub getDefaultWidgetArgs {
   my ($class, $w, $n) = @_;
 
   return exists $defaultWidgetArgs{$w} ?
     $defaultWidgetArgs{$w}->($n) : {};
+}
+
+sub getDefaultPlacementArgs {
+  my ($class, $w) = @_;
+
+  return exists $defaultPlacementArgs{$w} ?
+    $defaultPlacementArgs{$w} : {};
 }

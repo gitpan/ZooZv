@@ -1,6 +1,9 @@
 #!perl -w
 
 use strict;
+use Data::Dumper qw/Dumper/;
+use Getopt::Long;
+
 use lib '/home/aqumsieh/Tk804.025_beta15/lib/site_perl/5.8.3/i686-linux';
 use lib '/home/aqumsieh/Perl/myLib';
 use Tk 804.025;
@@ -11,13 +14,16 @@ use Tk::ToolBar;
 use Tk::Tree;
 use Tk::Compound;
 use Tk::ItemStyle;
+use Tk::Pane;
+use Tk::Labelframe;
+use Tk::DialogBox;
 
-use ZooZ::Options;
-use ZooZ::Fonts;
 use ZooZ::Forms;
-use ZooZ::Callbacks;
 use ZooZ::Project;
+use ZooZ::Options;
 use ZooZ::Generic;
+
+use constant DEBUG => 0;
 
 #
 # Global vars
@@ -27,6 +33,12 @@ our (
      $MW,
      $VERSION,
 
+     $SPLASH,
+     $SPLASH_MSG,
+     $SPLASH_PROG,
+     $NO_SPLASH,
+     $COPYRIGHT,
+
      # MainWindow frames
      $FRAME_L,
      $FRAME_M,
@@ -35,12 +47,14 @@ our (
      # toolbar
      $TB,
 
-     # Project notebook
-     $NB,
+     # menu
+     $MENU,
+     $PROJ_MENU,
 
-     # per project Tree widget.
-     $HIER_F,
-     @TREES,
+     # Settings Tab and Hash
+     $SETTINGS_F,
+     %SETTINGS,
+     %DEF_SETTINGS,
 
      # Widget frame
      $WIDGET_F,
@@ -49,11 +63,28 @@ our (
      $PROJID,
      $CURID,
      @PROJECTS, # holds the objects.
+     @PAGES,
+     @NAMES,
 
      # icons
      %ICONS,
      $SELECTED_W, # selected widget
      $SELECTED_L, # dummy label
+
+     # Extra ZooZ:: objects
+     $FONTOBJ,
+     $CALLBACKOBJ,
+     $VARREFOBJ,
+
+     # Global hash of all widgets.
+     # This can be used by users in callbacks.
+     %ZWIDGETS,
+
+     # Options for getOpen/SaveFile
+     @FILE_OPTIONS,
+
+     # What files correspond to what projects
+     @PROJECT_FILES,
     );
 
 
@@ -65,60 +96,305 @@ our %availableWidgets = (
 			 text     => [qw/Entry Text ROText/],
 			 menuList => [qw/Listbox Optionmenu/],
 			 datadisp => [qw/Canvas Scale ProgressBar HList NoteBook/],
-			 dialog   => [qw/Dialogbox Toplevel/],
-			 misc     => [qw/Scrollbar Labelframe Frame Adjuster/],
+#			 dialog   => [qw/Dialogbox Toplevel/],
+			 misc     => [qw/Labelframe Frame/],
+			 parasite => [qw/Scrollbar/],
+#			 parasite => [qw/VScrollbar HScrollbar Adjuster/],
 			);
 
 
 #
 # Inits
 #
-$VERSION = '0.9a';
-$PROJID  = 0;
+$VERSION      = '1.0-RC1';
+$PROJID       = 0;
+$NO_SPLASH    = 0;
+%DEF_SETTINGS = (
+		 -borderwidth => 1,
+		);
+%SETTINGS     = %DEF_SETTINGS;
+@FILE_OPTIONS = (
+		 -defaultextension => '.zooz',
+		 -initialdir       => '.',
+		 -filetypes        =>
+		 [
+		  ['ZooZ Files', '.zooz'],
+		  ['All Files',  '*'    ],
+		 ],
+		);
+$COPYRIGHT     = 'Copyright 2004 - Ala Qumsieh. All rights reserved.';
+
+# Control Data::Dumper
+$Data::Dumper::Indent = 0;
+
+#
+# Read any command line args
+#
+GetOptions(
+	   nosplash => \$NO_SPLASH,
+	  );
 
 #
 # create stuff
 #
 
-createGUI     ();
-createToolBar ();
-defineSettings();
-loadIcons     ();
-loadBitmaps   ();
-defineFonts   ();
-defineWidgets ();
-defineStyles  ();
+createMW          (); updateSplash('Initializing GUI');
+createGUI         (); updateSplash();
+createMenu        (); updateSplash();
+createToolBar     (); updateSplash('Loading Images');
+#defineSettings    ();
+loadIcons         (); updateSplash();
+loadBitmaps       (); updateSplash('Defining GUI Elements');
+defineFonts       (); updateSplash();
+defineWidgets     (); updateSplash();
+defineStyles      (); updateSplash('Initializing Modules');
+createExtraObjects(); updateSplash();
+createHandlers    (); updateSplash();
+ZooZ::Forms::createAllForms($MW);
+
+$SPLASH->withdraw;
+$MW->deiconify;
+
+ZooZ::Generic::popMessage($MW, "Welcome to ZooZv$VERSION");
+
+loadProject($_) for @ARGV;
 
 MainLoop;
 
-sub createGUI {
+sub updateSplash {
+  return if $NO_SPLASH;
+
+  $SPLASH_PROG++;
+  $SPLASH_MSG = shift if @_;
+  $SPLASH->update;
+  $MW->after(200);
+}
+
+sub createMW {
   $MW = new MainWindow;
+  $MW->withdraw;
   $MW->title("ZooZ v$VERSION");
   $MW->geometry("800x600+0+0");
+  $MW->protocol(WM_DELETE_WINDOW => \&closeApp);
 
+  { # Create the splash window
+    $SPLASH = $MW->Toplevel;
+    $SPLASH->withdraw;
+    $SPLASH->overrideredirect(1);
+    my $f = $SPLASH->Frame(-bd     => 2,
+			   -relief => 'ridge',
+			  )->pack(qw/-fill both -expand 1/);
+
+    my $logo  = $SPLASH->Photo(-file => 'ZooZ/icons/zooz_logo.gif');
+    my $logo2 = $SPLASH->Photo(-file => 'ZooZ/icons/screenshot4logo.gif');
+
+    #$f->Label(-image => $logo)->pack(qw/-side top/);
+    $f->Label(-image => $logo2)->pack(qw/-side top/);
+    $f->ProgressBar(-from     => 0,
+		    -to       => 11,
+		    -variable => \$SPLASH_PROG,
+		    -width    => 20,
+		    -colors   => [0 => 'lightblue'],
+		   )->pack(qw/-side top -fill x -pady 10 -padx 10/);
+
+    $f->Label(-textvariable => \$SPLASH_MSG,
+	     )->pack(qw/-fill x -side top/);
+
+    $f->Label(-text => $COPYRIGHT,
+	      -font => 'Times 10 normal',
+	     )->pack(qw/-fill x -side top/);
+
+    $SPLASH_PROG = 0;
+
+    # Now center it.
+    $SPLASH->update;
+    my $sw = $SPLASH->screenwidth;
+    my $sh = $SPLASH->screenheight;
+    my $rw = $SPLASH->reqwidth;
+    my $rh = $SPLASH->reqheight;
+
+    my $x  = int 0.5 * ($sw - $rw);
+    my $y  = int 0.5 * ($sh - $rh);
+
+    $SPLASH->geometry("+$x+$y");
+    $SPLASH->deiconify unless $NO_SPLASH;
+  }
+}
+
+sub createGUI {
+  # Left and main frames.
   $FRAME_L = $MW->Frame->pack(qw/-side left -fill y/);
-  $MW->Adjuster(-widget => $FRAME_L, -side => 'left')->pack(qw/-side left -fill y/);
   $FRAME_M = $MW->Frame->pack(qw/-side left -fill both -expand 1/);
-  $FRAME_R = $MW->Frame->pack(qw/-side right -fill y/);
 
-  $NB = $FRAME_M->NoteBook(qw/-borderwidth 1/)->pack(qw/-fill both -expand 1/);
-  $NB->add(qw/settings -label Settings/);
-
+  # frame to display selectable widgets.
   $WIDGET_F = $FRAME_L->Labelframe(
 				   -text => 'Available Widgets',
 				  )->pack(qw/-side top -fill both -expand 1/);
 
+  # Dummy label to drag around.
   $SELECTED_L = $MW->Label(-textvariable => \$SELECTED_W,
-			   #-cursor       => ['@trans_cur.xbm', 'trans_cur.msk', 'black', 'white'],
 			   -bg           => 'cornflowerblue',
 			   -relief       => 'raised',
 			   -borderwidth  => 1,
 			  );
 
+  # pressing Delete deletes selected widget.
+  $MW->bind('<Delete>' => sub { $CURID && $PROJECTS[$CURID]->deleteSelectedWidget });
+}
+
+sub createMenu {
+  $MENU = $MW->Menu(-type => 'menubar', -bd => 1);
+  $MW->configure(-menu => $MENU);
+
+  $MENU->optionAdd('*BorderWidth' => 1);
+
+  { # The File menu.
+    my $f = $MENU->cascade(-label => '~File', -tearoff => 0);
+    for my $ref (
+		 ['New Project',   \&newProject],
+		 'sep',
+		 ['Load Project',  \&loadProject],
+		 ['Save Project',  \&saveProject],
+		 ['Close Project', \&closeProject],
+		 'sep',
+		 ['Quit',          \&closeApp],
+		) {
+
+      if (ref $ref) {
+	$f->command(-label => $ref->[0], -command => $ref->[1]);
+      } else {
+	$f->separator;
+      }
+    }
+  }
+
+  {
+    # The edit menu.
+    my $f = $MENU->cascade(-label => '~Edit', -tearoff => 0);
+    for my $ref (
+		 ['Delete Selected Widget', sub { $CURID && $PROJECTS[$CURID]->deleteSelectedWidget }],
+		 'sep',
+		 ['Toggle Preview Window',  sub { $CURID && $PROJECTS[$CURID]->togglePreview }],
+		 'sep',
+		 ['Properties', sub {}],
+		) {
+
+      if (ref $ref) {
+	$f->command(-label => $ref->[0], -command => $ref->[1]);
+      } else {
+	$f->separator;
+      }
+    }
+  }
+
+  { # the configure menu.
+    my $f = $MENU->cascade(-label => '~Configure', -tearoff => 0);
+    for my $ref (
+		 ['Configure Selected Widget', sub { $CURID && $PROJECTS[$CURID]->configureSelectedWidget }],
+		 'sep',
+		 ['Configure Selected Row',    sub { $CURID && $PROJECTS[$CURID]->_configureRowCol('row', 'selected') }],
+		 ['Configure Selected Column', sub { $CURID && $PROJECTS[$CURID]->_configureRowCol('col', 'selected') }],
+		) {
+
+      if (ref $ref) {
+	$f->command(-label => $ref->[0], -command => $ref->[1]);
+      } else {
+	$f->separator;
+      }
+    }
+  }
+
+  { # The data menu.
+    my $f = $MENU->cascade(-label => '~Data', -tearoff => 0);
+    for my $ref (
+		 ['Variable Definitions', [\&ZooZ::Forms::chooseVar,      '']],
+		 ['Callback Definitions', [\&ZooZ::Forms::chooseCallback, '']],
+		 ['Font Definitions',     [\&ZooZ::Forms::chooseFont,     '']],
+		) {
+
+      if (ref $ref) {
+	$f->command(-label => $ref->[0], -command => $ref->[1]);
+      } else {
+	$f->separator;
+      }
+    }
+  }
+
+  # The project menu
+#  $PROJ_MENU = $MENU->cascade(-label   => '~Projects',
+#			      -tearoff => 0,
+#			     );
+  $PROJ_MENU = $MW->Menu(-tearoff     => 0);
+  $MENU->add(cascade =>
+	     -label  => 'Projects',
+	     -underline => 0,
+	     -menu   => $PROJ_MENU);
+
+  # What? no help?
 }
 
 sub defineSettings {
   # this sub populates the Setting tab.
+
+  my $f = $SETTINGS_F->Scrolled('Pane',
+				-sticky     => 'nsew',
+				-scrollbars => 'e',
+				-gridded    => 'xy',
+			       )->pack(qw/-fill both -expand 1/);
+
+  # populate the 'Defaults' frame
+  {
+    my $defFrame = $f->Labelframe(-text => 'Defaults')->pack(qw/-side top -fill x/);
+    $defFrame->optionAdd('*Entry.BorderWidth'  => 1);
+    $defFrame->optionAdd('*Button.BorderWidth' => 1);
+
+    my $row = 0;
+    my $col = 0;
+    for my $ref (
+		 [-borderwidth => 'Border Width'],
+		 [-background  => 'Background Color'],
+		 [-font        => 'Font'],
+		 [-foreground  => 'Foreground Color'],
+		) {
+
+      ZooZ::Options->addOptionGrid($ref->[0],
+				   $ref->[1],
+				   $defFrame,
+				   $row,
+				   $col,
+				   \$SETTINGS{$ref->[0]},
+				  );
+
+      ($row, $col) = $col ? ($row + 1, 0) : ($row, 4);
+    }
+
+    $defFrame->gridColumnconfigure(0, -weight  => 1);
+    $defFrame->gridColumnconfigure(4, -weight  => 1);
+    $defFrame->gridColumnconfigure(3, -minsize => 20);
+  }
+}
+
+### TBD. Check for any unsaved projects and prompt.
+###      For now, prompt anyway.
+
+sub closeApp {
+  # prompt.
+  my $ans = $MW->Dialog(-title   => 'Are you sure?',
+			-bitmap  => 'question',
+			-buttons => [qw/Yes No/],
+			-font    => 'Questions',
+			-text    => <<EOT)->Show;
+If you quit, any unsaved projects
+will be lost! Are you sure you want
+to quit ZooZ?
+EOT
+  ;
+  return if $ans eq 'No';
+
+  # make sure all localReturns are set.
+  ZooZ::Forms::cancelAllForms();
+
+  $MW->destroy;
 }
 
 sub defineWidgets {
@@ -127,34 +403,24 @@ sub defineWidgets {
 
   my $dum;
 
+  # make all cells of the same size.
+  my $cellwidth  = 0;
+  my $cellheight = 0;
+
   for my $o ([butLab   => 'Labels and Buttons'],
-	     [text     => 'Text Related'],
-	     [menuList => 'Menus and Lists'],
-	     [datadisp => 'Data Presentation'],
-	     [dialog   => 'Dialogs'],
-	     [misc     => 'Miscellaneous'],
+	     [text     => 'Text Related'      ],
+	     [menuList => 'Menus and Lists'   ],
+	     [datadisp => 'Data Presentation' ],
+	     #[dialog   => 'Dialogs'           ],
+	     [parasite => 'Non Stand-Alone'   ],
+	     [misc     => 'Miscellaneous'     ],
 	    ) {
 
     my $b;
 
-    my $dnd;
-
-    my $f = $WIDGET_F->Scrolled(qw/HList -scrollbars oe -bg white -columns 2/,
-				-font        => 'WidgetName', #[qw/helvetica 10/],
-				-borderwidth => 1,
-				-browsecmd   => \&selectWidgetToAdd,
-			       );
-				#-browsecmd => sub {
-#				  $SELECTED_W = shift;
-#				  print "Selected $SELECTED_W.\n";
-#				  $dnd->configure(-text        => $SELECTED_W,
-#						  -relief      => 'raised',
-#						  (exists $ICONS{lc $SELECTED_W} ?
-#						   (-image => $ICONS{lc $SELECTED_W}) :
-#						   (-image => '')),
-#						  -borderwidth => 1);
-#				});
-
+    my $f = $WIDGET_F->Frame(-bg          => 'white',
+			     -relief      => 'sunken',
+			     -borderwidth => 1);
     $b    = $WIDGET_F->Radiobutton(-text        => $o->[1],
 				   -indicatoron => 0,
 				   -variable    => \$dum,
@@ -168,150 +434,357 @@ sub defineWidgets {
 
     push @frames => $f;
 
-    for my $w (@{$availableWidgets{$o->[0]}}) {
-      my $image = lc $w;
-      $f->add($w);
-      $f->itemCreate($w, 0, -itemtype => 'imagetext',
-		     (exists $ICONS{$image} ? (-image => $ICONS{$image}) : (-bitmap => 'error')),
-		    );
-      $f->itemCreate($w, 1, -text => uc $w);
-    }
-    $firstBut ||= $b;
+    my $r = my $c = 0;
 
+    for my $w (@{$availableWidgets{$o->[0]}}) {
+      my $image  = lc $w;
+      my $button = $f->Button(-bg                 => 'white',
+			      -relief             => 'flat',
+			      -borderwidth        => 1,
+			      -highlightthickness => 0,
+			      -command            => [\&selectWidgetToAdd, $w],
+			       )->grid(-column => $c,
+				       -row    => $r,
+				       -sticky => 'nsew',
+				      );
+
+      my $comp = $button->Compound;
+      $button->configure(-image => $comp);
+      $comp->Line;
+      if (exists $ICONS{$image}) {
+	$comp->Image(-image => $ICONS{$image});
+      } else {
+	$comp->Bitmap(-bitmap => 'error');
+      }
+      $comp->Line;
+      $comp->Text(-text => uc $w, -font => 'WidgetName', -anchor => 's');
+
+      $button->update;
+      my $bw = $button->ReqWidth;
+      my $bh = $button->ReqHeight;
+      $cellwidth  = $bw if $bw > $cellwidth;
+      $cellheight = $bh if $bh > $cellheight;
+
+      if ($c) {
+	$c = 0;
+	$r++;
+      } else {
+	$c++;
+      }
+    }
+
+    $firstBut ||= $b;
+    $f->gridRowconfigure   (++$r, -weight => 1);
   }
 
+  # make sure they all have the same width.
   $firstBut->invoke;
+  $MW->update;
+  my $width = (sort {$b <=> $a} map $_->reqwidth, @frames)[0];
+  for my $f (@frames) {
+    $f->configure(-width => $width);
+    $f->gridPropagate(0);
+    $f->gridColumnconfigure($_, -minsize => $cellwidth ) for 0, 1;
+    $f->gridRowconfigure   ($_, -minsize => $cellheight) for 0 ..($f->gridSize)[1];
+  }
 }
 
 sub createToolBar {
   # create the ToolBar
   $TB = $MW->ToolBar(qw/-movable 0 -side top -cursorcontrol 0/);
-  $TB->Button(-image   => 'filenew22',
+  $TB->Button(-image   => 'filenew16',
 	      -tip     => 'New Project',
 	      -command => \&newProject,
 	     );
-  $TB->Button(-image   => 'fileclose22',
+  $TB->separator;
+  $TB->Button(-image   => 'fileopen16',
+	      -tip     => 'Load Project',
+	      -command => \&loadProject);
+  $TB->Button(-image   => 'filesave16',
+	      -tip     => 'Save Project',
+	      -command => \&saveProject);
+  $TB->Button(-image   => 'fileclose16',
 	      -tip     => 'Close Project',
 	      -command => \&closeProject,
 	     );
   $TB->separator;
-  $TB->Button(-image   => 'filesave22',
-	      -tip     => 'Save Project',
-	      -command => \&saveProject);
-  $TB->Button(-image   => 'fileopen22',
-	      -tip     => 'Load Project',
-	      -command => \&loadProject);
+  $TB->Button(-image   => 'textsortinc16',
+	      -tip     => 'Dump Perl Code',
+	      -command => \&dumpPerl,
+	     );
   $TB->separator;
-  $TB->Button(-image   => 'viewmag22',
+  $TB->Button(-image   => 'viewmag16',
 	      -tip     => 'Hide/Unhide Preview Window',
 	      -command => sub {
-		my $raised = $NB->raised;
-		$raised =~ s/PROJ// or return;
-		$PROJECTS[$raised]->togglePreview;
+		$CURID && $PROJECTS[$CURID]->togglePreview;
 	      });
-  $TB->Button(-image   => 'apptool22',
+  $TB->Button(-image   => 'apptool16',
 	      -tip     => 'Configure Selected Widget',
 	      -command => sub {
-		my $raised = $NB->raised;
-		$raised =~ s/PROJ// or return;
-		$PROJECTS[$raised]->configureSelectedWidget(1);
+		$CURID && $PROJECTS[$CURID]->configureSelectedWidget;
 	      });
   $TB->Button(-image   => 'actcross16',
 	      -tip     => 'Delete Selected Widget',
 	      -command => sub {
-		my $raised = $NB->raised;
-		$raised =~ s/PROJ// or return;
-		#$PROJECTS[$raised]->_deleteWidget('selected', 1);
-		$PROJECTS[$raised]->deleteSelectedWidget;
+		$CURID && $PROJECTS[$CURID]->deleteSelectedWidget;
 	      });
-  $TB->Button(-image   => 'viewmulticolumn22',
+  $TB->Button(-image   => 'viewmulticolumn16',
 	      -tip     => 'Configure Selected Row',
 	      -command => sub {
-		my $raised = $NB->raised;
-		$raised =~ s/PROJ// or return;
-		$PROJECTS[$raised]->_configureRowCol('row', 'selected');
+		$CURID && $PROJECTS[$CURID]->_configureRowCol('row', 'selected');
 	      });
-  $TB->Button(-image   => 'viewicon22',
+  $TB->Button(-image   => 'viewicon16',
 	      -tip     => 'Configure Selected Column',
 	      -command => sub {
-		my $raised = $NB->raised;
-		$raised =~ s/PROJ// or return;
-		$PROJECTS[$raised]->_configureRowCol('col', 'selected');
+		$CURID && $PROJECTS[$CURID]->_configureRowCol('col', 'selected');
 	      });
 }
 
 sub newProject {
+  $PROJECTS[$CURID]->togglePreview('OFF') if $CURID;
+
   $PROJID++;
+
   my $name = "Project $PROJID";
+  my $page = $FRAME_M->Frame;
 
-  my ($title, $rows, $cols);
-
-  # pop up the form.
-  ($name, $title, $rows, $cols) = ZooZ::Forms->projectData($MW, $name);
-  unless ($name) {
-    $PROJID--;
-    return;
-  }
-
-  # create the notebook page to house it.
-  my $page = $NB->add("PROJ$PROJID",
-		      -label    => $name,
-		      -raisecmd => \&focusIt);
-
+  $PAGES   [$PROJID] = $page;
+  $NAMES   [$PROJID] = $name;
   $PROJECTS[$PROJID] = new ZooZ::Project
     (
      -id     => $PROJID,
-     -parent => $page,
+     -top    => $page,
      -name   => $name,
-     -title  => $title,
-#     -rows   => $rows,
-#     -cols   => $cols,
-#     -selref => \$SELECTED_W,
+     -title  => $name,
      -icons  => \%ICONS,
     );
 
-  $NB->raise("PROJ$PROJID");
-  focusIt();
+  # focus it.
+  $CURID = $PROJID;
+  $_->packForget for $FRAME_M->packSlaves;
+  $page->pack(qw/-fill both -expand 1/);
+  $MW->title("ZooZ v$VERSION - $NAMES[$CURID]");
+
+  *ZWIDGETS = $PROJECTS[$CURID]->allWidgetsHash;
+
+  # add it to the menu.
+  $PROJ_MENU->command(-label   => $name,
+		      -command => [sub {
+				     my $id = shift;
+				     $PROJECTS[$CURID]->togglePreview('OFF') if $CURID;
+
+				     $CURID = $id;
+				     $_->packForget for $FRAME_M->packSlaves;
+				     $page->pack(qw/-fill both -expand 1/);
+				     $MW->title("ZooZ v$VERSION - $NAMES[$CURID]");
+				     $PROJECTS[$CURID]->togglePreview('ON');
+
+				     *ZWIDGETS = $PROJECTS[$CURID]->allWidgetsHash;
+				   }, $PROJID]);
+
+  $PROJECT_FILES[$CURID] = "project$CURID.zooz";
 }
 
+# must ask to save project first or not.
 sub closeProject {
+  $CURID or return;
 
+  my $ans = $MW->Dialog(-title   => 'Are you sure?',
+			-bitmap  => 'question',
+			-buttons => [qw/Yes No/, 'Save & Close'],
+			-font    => 'Questions',
+			-text    => <<EOT)->Show;
+Any changes you made to the project
+will be lost! Are you sure you want
+to close $NAMES[$CURID]?
+EOT
+  ;
+  return if $ans eq 'No';
+
+  saveProject() if $ans eq 'Save & Close';
+
+  # close the project. This means:
+  # 1. Unmapping it.
+  # 2. Cleaning up the project object.
+  # 3. Removing it from the Projects menu.
+  # 4. Change the MW title.
+  #$PAGES   [$CURID]->packForget;
+  $PAGES   [$CURID]->destroy;
+  $PROJECTS[$CURID]->closeMe;
+  $MW->title("ZooZ v$VERSION");
+
+  removeFromMenu($NAMES[$CURID]);
 }
 
 sub saveProject {
+  $CURID or return;
 
+  my $f = $MW->getSaveFile(@FILE_OPTIONS,
+			   -title => 'Choose File to Save',
+			   defined $PROJECT_FILES[$CURID] ?
+			   (-initialfile => $PROJECT_FILES[$CURID]) : (),
+			  );
+
+  defined $f or return;
+
+  $PROJECT_FILES[$CURID] = $f;
+
+  open my $fh, "> $f" or die $!;
+
+  print $fh "[ZooZ v$VERSION]\n\n";
+
+  $PROJECTS[$CURID]->save($fh);
+
+  # Now dump any subroutines.
+  for my $n ($CALLBACKOBJ->listAll) {
+    my $code = $CALLBACKOBJ->code($n);
+    s/\s+$//, s/^\s+// for $code;
+
+    print $fh <<EOT;
+\[Sub $n\]
+$code
+\[End Sub\]
+
+EOT
+  ;
+  }
+
+  # And dump any vars.
+  for my $v ($VARREFOBJ->listAll) {
+    my $val   = $v;
+    $val      =~ s/(.)/$ {1}main::/;
+    $val      = Dumper($1 eq "\$" ? eval "$val" : eval "\\$val");
+    $val      =~ s/\$VAR1 = //;
+    $val      =~ s/;$//;
+    $val      =~ s/^[\[\{]/\(/;  # stupid cperl mode
+    $val      =~ s/[\]\}]$/\)/;
+
+    print $fh <<EOT;
+\[Var $v\]
+$val
+\[End Var\]
+
+EOT
+  ;
+  }
+
+  close $fh;
 }
 
 sub loadProject {
+  my $f = shift;
 
-}
+  unless ($f) {
+    $f = $MW->getOpenFile(@FILE_OPTIONS,
+			  -title => 'Choose File to Load',
+			 );
+    defined $f or return;
+  }
 
-# invoked when user selects a project tab.
-# must make sure everything displayed is relevant
-# to selected project.
-sub focusIt {
-  # unmap the old project
-  #$PROJECTS[$CURID]->unmap if $CURID;
-  #$PROJECTS[$CURID]->disableDrops if $CURID;
+  $MW->Busy;
 
-  my $raised = $NB->raised;
-  $raised =~ s/PROJ//;
+  open my $fh, $f or die $!;
+  newProject();
+  my $proj = $PROJECTS[$CURID];
+  $PROJECT_FILES[$CURID] = $f;
 
-  $_->packForget for @TREES;
-  #$TREES[$raised]->pack(qw/-fill both -expand 1/);
+  my @DATA;
 
-  $CURID = $raised;
+  while (<$fh>) {
+    s/\#.*//;
 
-  # map the new project
-  #$PROJECTS[$CURID]->remap;
-  #$PROJECTS[$CURID]->enableDrops;
+    # Is it a widget?
+    if (/^\s*\[Widget\s+(\S+)\]/) {
+      my %data;
+      $data{NAME} = $1;
+
+      # read until the end of the widget definition.
+      while (<$fh>) {
+	s/\#.*//;
+	if (/^\s*\[End\s+Widget\]/) {
+	  # create the widget.
+	  #$proj->loadWidget(\%data);
+	  #last;
+
+	  # Don't create the widgets yet. Do that after the
+	  # sub and var definitions have been done.
+	  push @DATA => \%data;
+	  last;
+	}
+
+	if (/^\s*([PWE]CONF)\s+(\S+)(?:\s+(.*))?\s*$/) {
+	  my $v = defined $3 ? $3 : '';
+	  $data{$1}{$2} = $v eq 'undef' ? undef : $v;
+	  next;
+	}
+
+	next unless /^\s*(\S+)\s+(\S+)\s*$/;
+	$data{$1} = $2;
+      }
+
+      # is it a sub definition?
+    } elsif (/^\s*\[Sub\s+(\S+)\]/) {
+      my $name = $1;
+      my $code = '';
+
+      while (<$fh>) {
+	last if /^\s*\[End\s+Sub\]/;
+	$code .= $_;
+      }
+
+      $CALLBACKOBJ->add($name, $code);
+
+      # eval it.
+      {
+	no strict;
+	no warnings;
+
+	$code =~ s/sub \Q$name/sub /;
+	*{"main::$name"} = eval "package main; $code";
+      }
+
+      $CALLBACKOBJ->name2code($name, eval "\\&main::$name");
+
+      # is it a var?
+    } elsif (/^\s*\[Var\s+(\S+)\]/) {
+      my $name = $1;
+      my $val  = <$fh>;
+      <$fh>;  # [End Var]
+
+      $VARREFOBJ->add($name);
+      $name =~ s/^(.)/$ {1}main::/;
+      eval "$name = $val";
+
+      $VARREFOBJ->name2ref($name, eval "\\$name");
+
+      # Is it a row/col conf option?
+    } elsif (/^\s*\[(Row|Col)\s+(\d+)\]/) {
+      my $rowOrCol = $1;
+      my $num      = $2;
+
+      my %data;
+      while (<$fh>) {
+	last if /^\s*\[End\s+$rowOrCol\]/;
+
+	$data{$1} = $2 if /^\s*(\S+)\s+(.+?)\s*$/;
+      }
+
+      $proj->loadRowCol($rowOrCol, $num, %data);
+    }
+
+  }
+
+  # Now create all the widgets.
+  $proj->loadWidget($_) for @DATA;
+  $proj->unselectCurrentWidget;
+
+  $MW->Unbusy;
 }
 
 sub loadIcons {
   for my $file (<ZooZ/icons/*gif>) {  # should this use Tk->findINC ??
     my ($name) = $file =~ m|.*/(.+)\.gif|;
     $ICONS{$name} = $MW->Photo("$name-zooz", -format => 'gif', -file => $file);
-    #print "Size of $name = ", $ICONS{$name}->width, " by ", $ICONS{$name}->height, ".\n";
   }
 }
 
@@ -435,10 +908,32 @@ sub defineFonts {
 		  -family => 'helvetica',
 		  -size   => 9,
 		 );
+
+  $MW->fontCreate('Questions',
+		  -family => 'Nimbus',
+		  -size   => 10,
+		 );
+
+  $MW->fontCreate('Level',
+		  -family => 'helvetica',
+		  -size   => 13,
+		  -weight => 'normal',
+		 );
+
+  $MW->fontCreate('OptionText',
+		  -family => 'helvetica',
+		  -size   => 11,
+		  -weight => 'normal',
+		 );
+
+#  $MW->fontCreate('WidgetName',
+#		  -family => 'helvetica',
+#		  -size   => 12,
+#		 );
 }
 
 sub selectWidgetToAdd {
-  return unless $PROJID;
+  return unless $CURID;
 
   $SELECTED_W = shift;
 
@@ -470,8 +965,10 @@ sub selectWidgetToAdd {
 
   # clicking somewhere does something.
   $MW->bind('<1>' => sub {
-	      #$PROJECTS[$CURID]->dropWidget or return;
-	      $PROJECTS[$CURID]->dropWidgetInCurrentObject or return;
+	      $CURID or return;
+
+	      $PROJECTS[$CURID]->dropWidgetInCurrentObject
+		  or return;
 
 	      endDrag();
 	    });
@@ -487,9 +984,209 @@ sub endDrag {
 }
 
 sub defineStyles {
-  $MW->ItemStyle(imagetext  =>
-		 -stylename => 'container',
-		 -fg        => 'red',
+  $MW->ItemStyle(imagetext         =>
+		 -stylename        => 'container',
+		 -fg               => 'red',
 		 -selectforeground => 'red',
 		);
+}
+
+sub createExtraObjects {
+  # Create the font object
+  $FONTOBJ = new ZooZ::Fonts;
+
+  {
+    # create the default font.
+    # use a dummy label.
+    my $l    = $MW->Label      (-text => 'test');
+    my $c    = $l  ->configure ('-font');
+    my $font = $MW->fontCreate ('Default',
+				map {$_ => $c->[-1]->actual($_)}
+				qw/-family -size -weight -slant -underline -overstrike/,
+			       );
+    $l->destroy;
+    $FONTOBJ->add(Default => $font);
+  }
+
+  # create the callback object
+  $CALLBACKOBJ = new ZooZ::Callbacks;
+
+  # create the varRef object
+  $VARREFOBJ = new ZooZ::varRefs;
+}
+
+sub removeFromMenu {
+  my $c = shift;
+
+  for my $i (0 .. $PROJ_MENU->index('last')) {
+    my $l = $PROJ_MENU->entrycget($i, '-label');
+    next unless $l eq $c;
+
+    $PROJ_MENU->delete($i);
+    last;
+  }
+}
+
+sub createHandlers {
+  $SIG{__DIE__} = sub {
+    my $msg = "\n\nMessage:\n$_[0]";
+    chomp $msg;
+
+    $MW->Dialog(-title   => 'Fatal Error Detected',
+		-bitmap  => 'error',
+		-buttons => [qw/Ok/],
+		-font    => 'Questions',
+		-text    => join ' ' => split " \n", <<EOT)->Show;
+A fatal error has been detected and was trapped! 
+You can press 'Ok' and continue, but it is best 
+that you save your work and restart. If you can 
+reproduce this behaviour, then please send the necessary 
+steps to do so to aqumsieh\@cpan.org.
+$msg
+EOT
+  ;
+    goto &MainLoop;
+  };
+
+  open my $warnLog, "> ZooZ.log" or
+    die "ERROR: Could not create log file: $!\n";
+
+  $SIG{__WARN__} = sub {
+    print $warnLog shift;
+  };
+
+  $SIG{INT} = \&closeApp;
+}
+
+sub dumpPerl {
+  $CURID or return;
+
+  $MW->Busy;
+
+  my $fileName = $PROJECT_FILES[$CURID];
+  $fileName =~ s/\.[^.]+$/\.pl/; # chang extension
+
+  my $f = $MW->getSaveFile(
+			   -title       => 'Choose File to Save',
+			   -initialfile => $fileName,
+			  );
+
+  $f or return;
+
+  open my $fh, "> $f" or die "$f: $!\n";
+
+  # some headers.
+  my $time = localtime;
+
+  print $fh <<EOT;
+#!perl
+
+##################
+#
+# This file was automatically generated by ZooZ.pl v$VERSION
+# on $time.
+# Project: $NAMES[$CURID]
+# File:    $PROJECT_FILES[$CURID]
+#
+##################
+
+#
+# Headers
+#
+use strict;
+use warnings;
+use lib '/home/aqumsieh/Tk804.025_beta15/lib/site_perl/5.8.3/i686-linux';
+use Tk 804;
+
+#
+# Global variables
+#
+my (
+     # MainWindow
+     \$MW,
+
+     # Hash of all widgets
+     \%ZWIDGETS,
+    );
+
+#
+# User-defined variables (if any)
+#
+EOT
+  ;
+
+  # now dump the user-defined vars.
+  local $Data::Dumper::Indent = 2;
+
+  for my $v ($VARREFOBJ->listAll) {
+    my $val   = $v;
+    $val      =~ s/(.)/$ {1}main::/;
+    $val      = Dumper($1 eq "\$" ? eval "$val" : eval "\\$val");
+    $val      =~ s/\$VAR1 = //;
+    $val      =~ s/;$//;
+    $val      =~ s/^[\[\{]/\(/;  # stupid cperl mode
+    $val      =~ s/[\]\}]$/\)/;
+
+    chomp $val;
+
+    print $fh <<EOT;
+my $v = $val;
+
+EOT
+  ;
+  }
+
+  # Create the MainWindow
+  print $fh <<'EOT';
+
+######################
+#
+# Create the GUI
+#
+######################
+
+$MW = MainWindow->new;
+EOT
+  ;
+
+  # Now let the project do it's thing.
+  $PROJECTS[$CURID]->dumpPerl($fh);
+
+  # finish off
+  print $fh <<EOT;
+
+
+###############
+#
+# MainLoop
+#
+###############
+
+MainLoop;
+
+#######################
+#
+# Subroutines
+#
+#######################
+
+EOT
+  ;
+
+  # Now the subroutines.
+  for my $n ($CALLBACKOBJ->listAll) {
+    my $code = $CALLBACKOBJ->code($n);
+    s/\s+$//, s/^\s+// for $code;
+    $code =~ s/\A\#.*\n//;
+    $code =~ s/sub main::/sub /;
+
+    print $fh <<EOT;
+$code
+
+EOT
+  ;
+  }
+  close $fh;
+
+  $MW->Unbusy;
 }

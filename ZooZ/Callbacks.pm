@@ -8,6 +8,9 @@ package ZooZ::Callbacks;
 # By callbacks, I really mean subroutines.
 
 use strict;
+use base qw/ZooZ::Base/;
+
+my %CODE2NAME;    # hash to associate CODE(0xFFFF) with its sub name.
 
 1;
 
@@ -28,8 +31,12 @@ sub add {
   $self->{CB}{$name} = $code;
 }
 
-sub remove  { delete $_[0]->{CB}{$_[1]} }
-sub listAll { keys %{$_[0]->{CB}} }
+sub remove  {
+  my ($self, $name) = @_;
+
+  delete $self->{CB}{$name};
+  $self->removeWidget($name);
+}
 
 sub rename  {
   my ($self, $old, $new) = @_;
@@ -44,7 +51,8 @@ sub code {
   return $self->{CB}{$name};
 }
 
-sub index   { $_[0]->{I}++ }
+sub index   { $_[0]->{I}++        }
+sub listAll { keys %{$_[0]->{CB}} }
 
 sub newName {
   my $self = shift;
@@ -54,3 +62,13 @@ sub newName {
 }
 
 sub CallbackExists { exists $_[0]{CB}{$_[1]} }
+
+########################
+
+sub name2code {
+  my ($class, $name, $code) = @_;
+
+  $CODE2NAME{$code} = $name;
+}
+
+sub code2name { $CODE2NAME{$_[1]} }

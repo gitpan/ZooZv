@@ -5,9 +5,15 @@ use strict;
 use Tk qw/:colors/;
 use Tk::Tree;
 use Tk::ItemStyle;
+use Tk::ROText;
+use Tk::ProgressBar;
+use Tk::Pane;
+use Tk::NoteBook;
 
 use ZooZ::DefaultArgs;
-use ZooZ::Forms;   # ugly
+use ZooZ::Forms;
+use ZooZ::Options;
+use ZooZ::Generic;
 
 #############
 #
@@ -22,7 +28,15 @@ my $YoffS = 30;     # Y offset of first grid.
 my $maxR  = 20;    # max number of rows.
 my $maxC  = 20;    # max number or cols.
 
-my $isContainer = qr/^(?:Tk::)?(?:Lab(?:el)?)?[Ff]rame$/;  # for container widgets.
+my $isContainer  = qr/^(?:Tk::)?(?:Lab(?:el)?)?[Ff]rame$/;  # for container widgets.
+my $isParasite   = qr/Scrollbar|Adjuster/;
+my %scrollable   = ( # list of scrollable widgets
+		    Text   => 1,
+		    ROText => 1,
+		    Pane   => 1,
+		    Tree   => 1,
+		    HList  => 1,
+		   );
 
 ##############
 #
@@ -36,20 +50,26 @@ sub new {
   my $class = ref($self) || $self;
 
   my $obj = bless {
-		   PROJID    => $args{-id},
-		   PROJNAME  => $args{-name},
-		   PARENT    => $args{-parent},
-		   TITLE     => $args{-title},
-		   ICONS     => $args{-icons},
-		   SELECTED  => undef,                  # currently selected widget
-		   MOVABLE   => undef,                  # currently movable widget
-		   IDS       => $args{-ids} || {},      # widget ids to use when creating unique names.
-		   BALLOON   => $args{-parent}->Balloon,
-		   DRAGMODE  => 0,                      # if we are in drag mode.
-		   HIERTOP   => $args{-hiertop}  || 'MainWindow',
-		   ISCHILD   => $args{-ischild}  || 0,
-		   SUBHIERS  => $args{-subhiers} || {},
-		   CUROBJ    => $args{-curobj}   || [],
+		   PROJID      => $args{-id},
+		   PROJNAME    => $args{-name},
+		   TOP         => $args{-top},
+		   TITLE       => $args{-title},
+		   ICONS       => $args{-icons},
+		   SELECTED    => undef,                  # currently selected widget
+		   MOVABLE     => undef,                  # currently movable widget
+		   IDS         => $args{-ids} || {},      # widget ids to use when creating unique names.
+		   BALLOON     => $args{-top}->Balloon,
+		   DRAGMODE    => 0,                      # if we are in drag mode.
+		   HIERTOP     => $args{-hiertop}  || 'MainWindow',
+		   ISCHILD     => $args{-ischild}  || 0,
+		   SUBHIERS    => $args{-subhiers} || {},
+		   CUROBJ      => $args{-curobj}   || [],
+		   LEVEL       => $args{-level}    || 'MainWindow',
+		   #NB          => $args{-nb}       || undef,
+		   ALL_WIDGETS => $args{-widgets}  || {},
+		   HIERLABEL   => $args{-hierlab}  || undef,
+		   ROWOPT      => {},
+		   COLOPT      => {},
 		  } => $class;
 
   $obj->_createGrid;
@@ -62,6 +82,7 @@ sub new {
   } else {
     $obj->_createHierList;
     $obj->_createPreviewWindow;
+    $obj->_unhideCanvas;
   }
 
   $obj->{CUROBJ}[0]            = $obj;
@@ -81,15 +102,23 @@ sub _createHierList {
   my $self = shift;
 
   # bind tree such that when we click on a widget, it is selected.
-  my $tree = $self->{PARENT}->Scrolled(Tree =>
-				       -scrollbars  => 'sw',
+  my $tree = $self->{TOP}->Scrolled(Tree =>
+				       -scrollbars  => 'se',
 				       -borderwidth => 1,
 				       -browsecmd   => sub {
 					 return unless @_ == 1;
 
 					 my $labS = shift;
+					 my $self = $self->{CUROBJ}[0];
+
 					 $labS =~ s/(.*)\.// or do { # mainwindow
 					   $self->{CUROBJ}[0]->unselectCurrentWidget;
+
+					   # show the proper canvas.
+					   unless ($self->{CUROBJ}[0] == $self->{SUBHIERS}{MainWindow}) {
+					     #$self->{CUROBJ}[0]->_hideCanvas;
+					     $self = $self->{SUBHIERS}{MainWindow}->_unhideCanvas;
+					   }
 					   return;
 					 };
 
@@ -99,7 +128,7 @@ sub _createHierList {
 
 					 # show the proper canvas.
 					 unless ($self->{CUROBJ}[0] == $self->{SUBHIERS}{$hier}) {
-					   $self->{CUROBJ}[0]->_hideCanvas;
+					   #$self->{CUROBJ}[0]->_hideCanvas;
 					   $self = $self->{SUBHIERS}{$hier}->_unhideCanvas;
 					 }
 
@@ -115,6 +144,8 @@ sub _createHierList {
 
 					 $labS =~ s/(.*)\.// or return; # MainWindow
 
+					 my $self = $self->{CUROBJ}[0];
+
 					 # get the actual label widget.
 					 my ($r, $c) = @{$self->{LABEL2GRID}{$labS}};
 					 my $lab = $self->{GRID}[$r][$c]{LABEL};
@@ -127,6 +158,8 @@ sub _createHierList {
 					 $self->configureWidget($lab);
 				       },
 				      )->pack(qw/-side right -fill y/);
+
+  $tree->Subwidget($_)->configure(-borderwidth => 1) for qw/xscrollbar yscrollbar/;
 
   # create the entry for the main window.
   $tree->add('MainWindow', -text => 'MainWindow', -style => 'container');
@@ -147,6 +180,7 @@ sub _createPreviewWindow {
 
   my $t = $self->{PARENT}->Toplevel;
   $t->protocol(WM_DELETE_WINDOW => [$t => 'withdraw']);
+  $t->title   ($self->{TITLE});
 
   $self->{PREVIEW} = $t;
 }
@@ -159,12 +193,19 @@ sub _createPreviewWindow {
 
 sub togglePreview {
   my $self = shift;
+  my $mode = shift || '';
 
-  # toggle.
-  if ($self->{PREVIEW}->ismapped) {
+  if      ($mode eq 'OFF') {
     $self->{PREVIEW}->withdraw;
-  } else {
+  } elsif ($mode eq 'ON') {
     $self->{PREVIEW}->deiconify;
+  } else {
+    # toggle.
+    if ($self->{PREVIEW}->ismapped) {
+      $self->{PREVIEW}->withdraw;
+    } else {
+      $self->{PREVIEW}->deiconify;
+    }
   }
 }
 
@@ -178,12 +219,40 @@ sub togglePreview {
 sub _createGrid {
   my $self = shift;
 
+  # create the notebook if we have to.
+  #  unless ($self->{NB}) {
+  #    $self->{NB} = $self->{TOP}->NoteBook(qw/-borderwidth 1/
+  #)->pack(qw/-side left -fill both -expand 1/);
+#    my $nb = $self->{TOP}->Scrolled(NoteBook => qw/-borderwidth 1/,
+#				    -scrollbars => 'se',
+#				   )->pack(qw/-side left -fill both -expand 1/);
+#    $self->{NB} = $nb->Subwidget('notebook');
+#  }
+
+#  # add a page for this level.
+#  $self->{PARENT} = $self->{NB}->add($self->{LEVEL},
+#				     -label    => $self->{LEVEL},
+#				     -raisecmd => sub {
+#				       $self->{CUROBJ}[0] = $self;
+#				     },
+#				    );
+
+  unless ($self->{HIERLABEL}) {
+    $self->{HIERLABEL} = $self->{TOP}->Label(-text => $self->{LEVEL},
+					     -font => 'Level',
+					    )->pack(qw/-side top -fill x/);
+  }
+
+  $self->{PARENT} = $self->{TOP}->Frame;#->pack(qw/-side left -fill both -expand 1/);
+
   # create the canvas.
-  my $cv = $self->{CV} = $self->{PARENT}->Canvas(-bg      => 'white',
-						 -confine => 1,
-						)->pack(qw/-side left
-							-fill both
-							-expand 1/);
+  my $cv = $self->{CV} = $self->{PARENT}->Scrolled(Canvas   =>
+						   -bg      => 'white',
+						   -confine => 1,
+						   -scrollbars => 'se',
+						  )->pack(qw/-side left
+							  -fill both
+							  -expand 1/);
 
   # draw the grid.
   my $x = $XoffS;
@@ -212,11 +281,6 @@ sub _createGrid {
     my $y = $YoffS + $gridH / 2;
 
     for my $r (0 .. $maxR - 1) {
-#      $cv->createText($x, $y,
-#		      -text => $r,
-#		      -font => 'Row/Col Num',
-#		      -fill => 'grey25',
-#		     );
 
       my $b = $cv->Button(-text               => $r,
 			  -padx               => 2,
@@ -258,11 +322,7 @@ sub _createGrid {
 		       );
 
       $self->{BALLOON}->attach($b, -balloonmsg => "Configure Column $c");
-#      $cv->createText($x, $y,
-#		      -text => $c,
-#		      -font => 'Row/Col Num',
-#		      -fill => 'grey25',
-#		     );
+
       $x += $gridW;
     }
   }
@@ -333,7 +393,6 @@ sub _defineBindings {
   my $cv = $self->{CV};
 
   $cv->CanvasBind('<1>' => [$self => 'unselectCurrentWidget']);
-
   #$cv->CanvasBind('<<DropWidget>>' => \&dropWidget);
 }
 
@@ -460,8 +519,6 @@ sub resizeWidget {
     $cv->coords($gridRef->{WINDOW},
 		($box[0] + $box[2] - 1) / 2,
 		($box[1] + $new[1]) / 2,
-#		($box[0] + $new[0]) / 2,
-#		($box[1] + $box[3] - 1) / 2,
 	       );
 
     $cv->itemconfigure($gridRef->{WINDOW},
@@ -509,12 +566,39 @@ sub dropWidget {
   my ($id, $row, $col) = $self->_getGridClick;
 
   # didn't click on anything useful.
-  return undef unless defined $id;
+  ZooZ::Generic::popMessage($::MW, 'Please click on a grid location.', 1500) &&
+      return undef unless defined $id;
 
   my $ref = $self->{GRID}[$row][$col];
 
   # is it an empty location?
-  return undef if $ref->{WIDGET};
+  # If NOT empty and widget to be dropped is a parasite
+  # (ex. scrollbar), then add it to the currently placed widget.
+
+  if ($ref->{WIDGET}) {
+    # not empty.
+    # Go on ONLY if parasite.
+    ZooZ::Generic::popMessage($::MW, 'Please click on an empty grid location.', 1500) &&
+	return undef unless $::SELECTED_W =~ $isParasite;
+
+    # If scrollbar, then make object scrolled if it is scrollable.
+    if ($::SELECTED_W =~ /scroll/i) {
+      ZooZ::Generic::popMessage($::MW, "Widget $ref->{WIDGET} is not scrollable!", 1500) &&
+	  return undef unless exists $scrollable{$ref->{WIDGET}};
+
+      $ref->{ECONF}{SCROLLON} = 1;
+    }
+
+    return 1;
+  } else {
+    # empty.
+    # Go on ONLY if added widget is NOT a parasite.
+    ZooZ::Generic::popMessage($::MW, <<EOT, 1500) && return undef if $::SELECTED_W =~ $isParasite;
+A $::SELECTED_W widget can only be
+used in conjunction with a scrollable widget.
+EOT
+  ;
+  }
 
   # it is empty. Fill it up.
   $ref->{WIDGET}= $::SELECTED_W;
@@ -543,6 +627,9 @@ sub dropWidget {
   $ref ->{LABFRAME}           = $frame;
   $ref ->{ROWS}               = 1;
   $ref ->{COLS}               = 1;
+  $ref ->{PCONF}              = {};
+  $ref ->{WCONF}              = {};
+  $ref ->{ECONF}              = {};
   $self->{LABEL2GRID}{$label} = [$row, $col];
 
   # create the compound image to place in the label.
@@ -551,7 +638,7 @@ sub dropWidget {
   if (exists $self->{ICONS}{lc $::SELECTED_W}) {
     $compound->Image(-image => $self->{ICONS}{lc $::SELECTED_W});
   } else {
-    $compound->Bitmap(-bitmap => 'error');#, -background => 'cornflowerblue');
+    $compound->Bitmap(-bitmap => 'error');
   }
   $compound->Line;
   $compound->Text(-text => $name,
@@ -561,10 +648,21 @@ sub dropWidget {
   $self->_bindWidgetLabel($label);
 
   # create the actual preview widget.
-  {
-    my $args = ZooZ::DefaultArgs->getDefaults($::SELECTED_W, $name);
-    my $type = $::SELECTED_W eq 'Image' ? 'Label' : $::SELECTED_W;
+  my $type = $::SELECTED_W eq 'Image' ? 'Label' : $::SELECTED_W;
+  my $args = ZooZ::DefaultArgs->getDefaultWidgetArgs($::SELECTED_W, $name);
 
+  # Convert all frames to Panes.
+  $type = 'Pane' if $type eq 'Frame';
+
+  # Make it Scrolled .. just for the preview.
+  if (exists $scrollable{$type}) {
+    $ref->{PREVIEW} = $self->{PREVIEW}->Scrolled($type,
+						 -scrollbars => '',
+						 %$args
+						);
+    #print "scrolled = ", $ref->{PREVIEW}->Subwidget(lc $type)->configure(%$args), ".\n";
+    #print "Propagate = ", $ref->{PREVIEW}->Subwidget(lc $type)->gridPropagate, ".\n";
+  } else {
     $ref->{PREVIEW} = $self->{PREVIEW}->$type(%$args);
   }
 
@@ -574,14 +672,56 @@ sub dropWidget {
 		    );
   $self->{TREE}->autosetmode;
 
+  # if it's a container, create the notebook tab for it.
+  if ($::SELECTED_W =~ $isContainer) {
+    my $proj = $self->new(-id       => $self->{PROJID},
+			  -top      => $self->{TOP},
+			  -name     => $self->{PROJNAME},
+			  -title    => $self->{TITLE},
+			  -icons    => $self->{ICONS},
+			  -ids      => $self->{IDS},
+			  -hiertop  => "$self->{HIERTOP}.$label",
+			  -ischild  => 1,
+			  -tree     => $self->{TREE},
+			  -preview  => $self->{GRID}[$row][$col]{PREVIEW},
+			  -curobj   => $self->{CUROBJ},
+			  -subhiers => $self->{SUBHIERS},
+			  -level    => "$self->{LEVEL}.$self->{GRID}[$row][$col]{NAME}",
+			  -nb       => $self->{NB},
+			  -widgets  => $self->{ALL_WIDGETS},
+			  -hierlab  => $self->{HIERLABEL},
+			 );
+
+    $self->{SUBHIERS}{$label} = $proj;
+
+    # return the cur obj to the parent.
+    $self->{CUROBJ}[0]        = $self;
+  }
+
   # select it
-  $self->selectWidget    ($label);
+  $self->selectWidget($label);
+
+  # update the default arguments.
+  # this will tag them as 'changed' and will output them
+  # in the project file and code dump.
+  $ref->{WCONF}{$_} = $args->{$_} for keys %$args;
 
   # must update the preview window.
   $self->updatePreviewWindow;
 
+  # add it to the global hash.
+  $self->{ALL_WIDGETS}{$name} = $ref->{PREVIEW};
+
   return 1;
 }
+
+#############
+#
+# Returns a ref to the ALL_WIDGETS hash
+#
+#############
+
+sub allWidgetsHash { $_[0]{ALL_WIDGETS} }
 
 #############
 #
@@ -595,7 +735,7 @@ sub _bindWidgetLabel {
   $lab->bind('<1>'                => [$self, 'selectWidget',    $lab   ]);
   $lab->bind('<B1-Motion>'        => [$self, 'dragWidget',      $lab   ]);
   $lab->bind('<B1-ButtonRelease>' => [$self, 'moveWidget',      $lab   ]);
-  $lab->bind('<Double-1>'         => [$self, 'configureWidget', $lab, 1]);
+  $lab->bind('<Double-1>'         => [$self, 'configureWidget', $lab,  ]);
 }
 
 #####################
@@ -753,7 +893,7 @@ sub selectWidget {
   $self->{TREE}->anchorSet   ("$self->{HIERTOP}.$lab");
 
   # if the configure form is open, reflect there too.
-  $self->configureWidget($lab, 0);
+  $self->configureWidget($lab, 1);
 }
 
 ###############
@@ -898,6 +1038,9 @@ sub deleteSelectedWidget {
   # clean up the hier list.
   $self->{TREE}->delete(entry => "$self->{HIERTOP}.$ref->{LABEL}");
 
+  # clean up the widget properties window.
+  ZooZ::Forms->deleteWidget($self->{PROJID}, $ref->{NAME});
+
   # clean up the preview window.
   $ref->{PREVIEW}->destroy;
 
@@ -948,31 +1091,8 @@ sub descendHier {
 
   my $lab  = $self->{SELECTED};
 
-  my ($r, $c) = @{$self->{LABEL2GRID}{$lab}};
-
-  # create one if it doesn't exist.
-  unless (exists $self->{SUBHIERS}{$lab}) {
-    my $proj = $self->new(-id       => $self->{PROJID},
-			  -parent   => $self->{PARENT},
-			  -name     => $self->{PROJNAME},
-			  -title    => $self->{TITLE},
-			  -icons    => $self->{ICONS},
-			  -ids      => $self->{IDS},
-			  -hiertop  => "$self->{HIERTOP}.$lab",
-			  -ischild  => 1,
-			  -tree     => $self->{TREE},
-			  -preview  => $self->{GRID}[$r][$c]{PREVIEW},
-			  -curobj   => $self->{CUROBJ},
-			  -subhiers => $self->{SUBHIERS},
-			 );
-
-    $proj->_hideCanvas;
-
-    $self->{SUBHIERS}{$lab} = $proj;
-  }
-
   # hide the current. unhide the child.
-  $self->_hideCanvas;
+  #$self->_hideCanvas;
   $self->{SUBHIERS}{$lab}->_unhideCanvas;
 }
 
@@ -982,35 +1102,157 @@ sub descendHier {
 #
 #################
 
-sub _hideCanvas   { $_[0]{CV}->packForget }
+#sub _hideCanvas   { $_[0]{CV}->packForget }
+sub _hideCanvas {}
 
 #################
 #
-# This sub unhides the canvas of the calling project
+# This sub unhides the canvas of the calling project.
+# It is IMPORTANT that it returns the project itself.
 #
 #################
 
 sub _unhideCanvas {
   my $self = shift;
 
-  $self->{CV}->pack(qw/-side left -fill both -expand 1/);
+  # lift the correct tab.
+  #$self->{NB}->raise($self->{LEVEL});
+  $self->{CUROBJ}[0]{PARENT}->packForget if $self->{CUROBJ}[0];
+  $self->{PARENT}->pack(qw/-fill both -expand 1/);
+  $self->{HIERLABEL}->configure(-text => $self->{LEVEL});
+
+  #$self->{CV}->pack(qw/-side left -fill both -expand 1/);
   $self->{CUROBJ}[0] = $self;
+  return $self;
 }
 
+#####################
+#
+# This calls the proper form in ZooZ::Forms to configure
+# the given widget.
+#
+#####################
+
 sub configureWidget {
-  my ($self, $lab, $force) = @_;
+  my ($self, $lab, $noforce) = @_;
 
   my ($r, $c) = @{$self->{LABEL2GRID}{$lab}};
   my $ref     = $self->{GRID}[$r][$c];
 
-  ZooZ::Forms->widgetConf(
-			  $self->{PARENT},
-			  $self->{PROJID},
-			  $ref ->{NAME},
-			  $ref ->{PREVIEW},
-			  $force,
-			 );
+  ZooZ::Forms->configureWidget(
+			       $self,
+			       $self->{PARENT},
+			       $self->{PROJID},
+			       $ref ->{NAME},
+			       $ref ->{PREVIEW},
+			       $ref ->{WCONF},
+			       $ref ->{PCONF},
+			       $ref ->{ECONF},
+			       $noforce,
+			       exists $scrollable{$ref->{WIDGET}},
+			      );
 }
+
+#################################
+#
+# This duplicates the placement options of the
+# selected widget, according to the given
+# argument. It is called from Forms.pm
+#
+#################################
+
+sub duplicatePlacementOptions {
+  my ($self, $r_how) = @_;
+
+  # get the configuration options of the selected widget.
+  my $lab     = $self->{SELECTED};
+  my ($r, $c) = @{$self->{LABEL2GRID}{$lab}};
+  my $opt     = $self->{GRID}[$r][$c]{PCONF};
+
+  # get a list of the widgets to apply the options to.
+  my $how = $$r_how;
+  my @list;    # keep list of all widgets.
+  if      ($how eq 'All Widgets') {
+    for my $l (keys %{$self->{LABEL2GRID}}) {
+      next if $l eq $lab;  # stringified
+      next if $l eq $lab;
+
+      my ($r, $c) = @{$self->{LABEL2GRID}{$l}};
+      push @list => $self->{GRID}[$r][$c]{PCONF};
+    }
+  } elsif ($how eq 'Similar Widgets') {
+    my $me = $self->{GRID}[$r][$c]{WIDGET};
+
+    for my $l (keys %{$self->{LABEL2GRID}}) {
+      next if $l eq $lab;  # stringified
+
+      my ($r, $c) = @{$self->{LABEL2GRID}{$l}};
+      my $ref     = $self->{GRID}[$r][$c];
+
+      next unless $ref->{WIDGET} eq $me;
+
+      push @list => $self->{GRID}[$r][$c]{PCONF};
+    }
+  } elsif ($how eq 'All Widgets in Same Row') {
+    for my $l (keys %{$self->{LABEL2GRID}}) {
+      next if $l eq $lab;  # stringified
+
+      my ($r2, $c2) = @{$self->{LABEL2GRID}{$l}};
+      next unless $r2 == $r;
+
+      push @list => $self->{GRID}[$r2][$c2]{PCONF};
+    }
+  } elsif ($how eq 'All Widgets in Same Column') {
+    for my $l (keys %{$self->{LABEL2GRID}}) {
+      next if $l eq $lab;  # stringified
+
+      my ($r2, $c2) = @{$self->{LABEL2GRID}{$l}};
+      next unless $c2 == $c;
+
+      push @list => $self->{GRID}[$r2][$c2]{PCONF};
+    }
+  } elsif ($how eq 'Similar Widgets in Same Row') {
+    my $me = $self->{GRID}[$r][$c]{WIDGET};
+
+    for my $l (keys %{$self->{LABEL2GRID}}) {
+      next if $l eq $lab;  # stringified
+
+      my ($r2, $c2) = @{$self->{LABEL2GRID}{$l}};
+      next unless $r2 == $r;
+
+      my $ref       = $self->{GRID}[$r2][$c2];
+      next unless $ref->{WIDGET} eq $me;
+
+      push @list => $ref->{PCONF};
+    }
+  } elsif ($how eq 'Similar Widgets in Same Column') {
+    my $me = $self->{GRID}[$r][$c]{WIDGET};
+
+    for my $l (keys %{$self->{LABEL2GRID}}) {
+      next if $l eq $lab;  # stringified
+
+      my ($r2, $c2) = @{$self->{LABEL2GRID}{$l}};
+      next unless $c2 == $c;
+
+      my $ref       = $self->{GRID}[$r2][$c2];
+      next unless $ref->{WIDGET} eq $me;
+
+      push @list => $ref->{PCONF};
+    }
+  } else {
+    # WHAT? Impossible!!
+  }
+
+  for my $p (@list) {
+    $p->{$_} = $opt->{$_} for qw/-sticky -ipadx -ipady -padx -pady n s e w/;
+  }
+}
+
+##################
+#
+# Called by ZooZ.pl. Simple wrapper around configureWidget()
+#
+##################
 
 sub configureSelectedWidget {
   my $self = $_[0]{CUROBJ}[0];
@@ -1019,28 +1261,543 @@ sub configureSelectedWidget {
   goto &configureWidget;
 }
 
+#####################
+#
+# This calls the proper form in ZooZ::Forms to configure
+# the given row.
+#
+#####################
+
 sub configureRow {
   my ($self, $row) = @_;
 
-  ZooZ::Forms->rowColConf(
-			  $self->{PARENT},
-			  $self->{PROJID},
-			  $self->{HIERTOP},
-			  $self->{PREVIEW},
-			  row => $row,
-			 );
+  ZooZ::Forms->configureRowCol(
+			       #$self->{PARENT},
+			       $self->{PROJID},
+			       #$self->{HIERTOP},
+			       $self->{LEVEL},
+			       $self->{PREVIEW},
+			       row => $row,
+			       $self->{ROWOPT},
+			      );
 }
+
+#####################
+#
+# This calls the proper form in ZooZ::Forms to configure
+# the given column.
+#
+#####################
 
 sub configureCol {
   my ($self, $col) = @_;
 
-  ZooZ::Forms->rowColConf(
-			  $self->{PARENT},
-			  $self->{PROJID},
-			  $self->{HIERTOP},
-			  $self->{PREVIEW},
-			  col => $col,
-			 );
+  ZooZ::Forms->configureRowCol(
+			       #$self->{PARENT},
+			       $self->{PROJID},
+			       #$self->{HIERTOP},
+			       $self->{LEVEL},
+			       $self->{PREVIEW},
+			       col => $col,
+			       $self->{COLOPT},
+			      );
+}
+
+#############################
+#
+# Method that loads the row/col constraints when loading a project.
+#
+#############################
+
+sub loadRowCol {
+  my ($self,
+      $rowOrCol,
+      $num,
+      %data) = @_;
+
+  my $top = delete $data{Parent};
+
+  if ($top =~ /GRID_(\d+)_(\d+)/) {
+    $top = $self->{GRID}[$1][$2]{LABEL};
+  }
+
+  my $obj    = $self->{SUBHIERS}{$top};
+  my $method = $rowOrCol eq 'Row'? 'gridRowconfigure' : 'gridColumnconfigure';
+
+  $obj->{PREVIEW}->$method($num, %data);
+  $obj->{uc($rowOrCol) . "OPT"}{$_} = $data{$_} for keys %data;
+}
+
+#############################
+#
+# Method to save project to file.
+#
+#############################
+
+sub save {
+  my ($self, $fh, $parent) = @_;
+
+  $parent ||= 'MainWindow';
+
+  for my $lab (keys %{$self->{LABEL2GRID}}) {
+    my ($row, $col) = @{$self->{LABEL2GRID}{$lab}};
+    my $ref         = $self->{GRID}[$row][$col];
+
+    # print the basic info.
+    print $fh <<EOT;
+\[Widget $ref->{NAME}\]
+Parent   $parent
+Type     $ref->{WIDGET}
+Row      $row
+Col      $col
+Rowspan  $ref->{ROWS}
+Colspan  $ref->{COLS}
+EOT
+  ;
+
+    # now the options.
+    for my $h (qw/WCONF PCONF ECONF/) {
+      for my $k (sort keys %{$ref->{$h}}) {
+	next if $h eq 'PCONF' && $k =~ /^[nsew]$/;
+
+	# consider only the ones that changed.
+	my $tiedObj = tied $ref->{$h}{$k};
+	next if $tiedObj && ref($tiedObj) eq 'ZooZ::TiedVar' && !$tiedObj->{C};
+	
+	my $v = $ref->{$h}{$k};
+
+	# special treatment for images.
+	# and for callbacks.
+
+	if ($h eq 'WCONF' && $v && exists $ZooZ::Options::options{$k} &&
+	    $ZooZ::Options::options{$k}[0] eq 'Image') {
+
+	  eval {$v = $ref->{$h}{$k}->cget('-file')};
+
+	} elsif ($h eq 'WCONF' && $v && exists $ZooZ::Options::options{$k} &&
+		 $ZooZ::Options::options{$k}[0] eq 'Callback') {
+
+	  $v = $::CALLBACKOBJ->code2name($v);
+	  $v = '\&' . $v;
+	} elsif ($h eq 'WCONF' && $v && exists $ZooZ::Options::options{$k} &&
+		 $ZooZ::Options::options{$k}[0] eq 'VarRef') {
+
+	  $v = "\\" . $::VARREFOBJ->ref2name($v);
+	}
+
+	$v = 'undef' unless defined $v;
+
+	print $fh "$h  $k  $v\n";
+      }
+    }
+
+    print $fh "[End Widget]\n\n";
+
+    # if a container, then call recursively.
+    if (exists $self->{SUBHIERS}{$lab}) {
+      $self->{SUBHIERS}{$lab}->save($fh, "GRID_$ {row}_$ {col}");
+    }
+  }
+
+  # Now spit out any row/col configurations ..
+  {
+    my ($cols, $rows) = $self->{PREVIEW}->gridSize;
+
+    # first the columns.
+    for my $col (0 .. $cols - 1) {
+      # get the minsize/weight/pad data.
+      my %data = $self->{PREVIEW}->gridColumnconfigure($col);
+
+      my $data = join "\n" => map "$_\t$data{$_}" => grep $data{$_} => keys %data;
+      $data or next;
+
+      print $fh <<EOCOL;
+\[Col $col\]
+Parent $parent
+$data
+\[End Col\]
+
+EOCOL
+  ;
+    }
+
+    # then the rows.
+    for my $row (0 .. $rows - 1) {
+      # get the minsize/weight/pad data.
+      my %data = $self->{PREVIEW}->gridRowconfigure($row);
+
+      my $data = join "\n" => map "$_\t$data{$_}" => grep $data{$_} => keys %data;
+      $data or next;
+
+      print $fh <<EOROW;
+\[Row $row\]
+Parent $parent
+$data
+\[End Row\]
+
+EOROW
+  ;
+    }
+  }
+
+}
+
+
+#####################
+#
+# This method is called by ZooZ.pl when
+# loading a project. It loads a single widget
+# and updates its configuration.
+# code dupe and UGLY :(
+#
+#####################
+
+sub loadWidget {
+  my ($self, $data) = @_;
+
+  my $nam = delete $data->{NAME};
+  my $row = delete $data->{Row};
+  my $col = delete $data->{Col};
+  my $top = delete $data->{Parent};
+  my $typ = delete $data->{Type};
+  my $rsp = delete $data->{Rowspan};
+  my $csp = delete $data->{Colspan};
+
+  # create widget in which object?
+  if ($top =~ /GRID/) {
+    my ($r, $c) = $top =~ /GRID_(\d+)_(\d+)/;
+
+    $top = $self->{GRID}[$r][$c]{LABEL};
+  }
+  my $obj = $self->{SUBHIERS}{$top};
+
+  # create the widget.
+  my $ref = $obj->{GRID}[$row][$col];
+  $ref->{WIDGET} = $typ;
+  $obj->{IDS}{$typ}++;
+
+  # get coordinates of window.
+  my $cv = $obj->{CV};
+  my @c  = $cv->coords("GRID_$ {row}_$ {col}");
+  my $w  = $c[2] - $c[0];
+  my $h  = $c[3] - $c[1];
+
+  # create the label and window.
+  my $frame = $cv->Frame(-relief => 'raised', -bd => 1);
+  my $label = $frame->Label->pack(qw/-fill both -expand 1/);
+
+  $ref->{WINDOW} = $cv->createWindow($c[0] + $w / 2,
+				     $c[1] + $h / 2,
+				     -window => $frame,
+				     -width  => $w,
+				     -height => $h,
+				    );
+
+  $ref ->{NAME}               = $nam;
+  $ref ->{LABEL}              = $label;
+  $ref ->{LABFRAME}           = $frame;
+  $ref ->{ROWS}               = 1;
+  $ref ->{COLS}               = 1;
+  $ref ->{PCONF}              = {};
+  $ref ->{WCONF}              = {};
+  $ref ->{ECONF}              = {};
+  $obj ->{LABEL2GRID}{$label} = [$row, $col];
+
+  # create the compound image to place in the label.
+  my $compound = $label->Compound;
+  $label->configure(-image => $compound);
+  if (exists $self->{ICONS}{lc $typ}) {
+    $compound->Image(-image => $self->{ICONS}{lc $typ});
+  } else {
+    $compound->Bitmap(-bitmap => 'error');
+  }
+  $compound->Line;
+  $compound->Text(-text => $nam,
+		  -font => 'WidgetName',
+		 );
+
+  $obj->_bindWidgetLabel($label);
+
+  # create the actual preview widget.
+  my $type = $typ eq 'Image' ? 'Label' : $typ;
+  my $args = ZooZ::DefaultArgs->getDefaultWidgetArgs($typ, $nam);
+
+  # Convert all frames to Panes.
+  $type = 'Pane' if $type eq 'Frame';
+
+  # Make it Scrolled .. just for the preview.
+  if (exists $scrollable{$type}) {
+    $ref->{PREVIEW} = $obj->{PREVIEW}->Scrolled($type,
+						-scrollbars => '',
+						%$args
+					       );
+    #print "scrolled = ", $ref->{PREVIEW}->Subwidget(lc $type)->configure(%$args), ".\n";
+    #print "Propagate = ", $ref->{PREVIEW}->Subwidget(lc $type)->gridPropagate, ".\n";
+  } else {
+    $ref->{PREVIEW} = $obj->{PREVIEW}->$type(%$args);
+  }
+
+  # add to the hier tree
+  $obj->{TREE}->add($obj->{HIERTOP} . '.' . $label, -text => $nam,
+		    $typ =~ $isContainer ? (-style => 'container') : ()
+		   );
+  $obj->{TREE}->autosetmode;
+
+  # if it's a container, create the notebook tab for it.
+  if ($typ =~ $isContainer) {
+
+    my $proj = $obj->new(-id       => $obj->{PROJID},
+			 -top      => $obj->{TOP},
+			 -name     => $obj->{PROJNAME},
+			 -title    => $obj->{TITLE},
+			 -icons    => $obj->{ICONS},
+			 -ids      => $obj->{IDS},
+			 -hiertop  => "$obj->{HIERTOP}.$label",
+			 -ischild  => 1,
+			 -tree     => $obj->{TREE},
+			 -preview  => $obj->{GRID}[$row][$col]{PREVIEW},
+			 -curobj   => $obj->{CUROBJ},
+			 -subhiers => $obj->{SUBHIERS},
+			 -level    => "$obj->{LEVEL}.$obj->{GRID}[$row][$col]{NAME}",
+			 -nb       => $obj->{NB},
+			 -widgets  => $obj->{ALL_WIDGETS},
+			 -hierlab  => $self->{HIERLABEL},
+			);
+
+    $obj->{SUBHIERS}{$label} = $proj;
+  }
+
+  # update all the configuration options.
+  # we need to do this twice. Once before selecteWidget()
+  # and again after. The reason is that selectWidget calls
+  # the callbacks form in ZooZ::Forms which sets up the ties.
+  # we need the vars updated BEFORE to update some option labels.
+  # we need the vars updated AFTER to make sure everything reflects
+  # properly (configure is called by the tieing class).
+
+  for my $h (qw/WCONF PCONF/) {
+    for my $k (keys %{$data->{$h}}) {
+      if ($h eq 'PCONF' && $k eq '-sticky') {
+	$ref->{$h}{$1} = $1 while $data->{$h}{$k} =~ /(.)/g;
+      }
+
+      $ref->{$h}{$k} = $data->{$h}{$k};
+    }
+  }
+
+  # select it
+  $obj->selectWidget($label);
+
+  # update again.
+  # no need to update [nsew] since they are not tied.
+  !/^[nsew]$/ and $ref->{PCONF}{$_} = $data->{PCONF}{$_} for keys %{$ref->{PCONF}};
+
+  for my $k (keys %{$ref->{WCONF}}) {
+    my $v = $data->{WCONF}{$k};
+
+    if ($v && $ZooZ::Options::options{$k}[0] eq 'Callback') {
+      $v =~ y/\\&//d;
+      $v = eval "\\&$v";
+
+    } elsif ($v && $ZooZ::Options::options{$k}[0] eq 'Image') {
+      if      ($v =~ /\.(?:gif|pgm|ppm)$/) {
+	$v = $self->{PARENT}->Photo(-file => $v);
+      } elsif ($v =~ /\.bmp$/) {
+	$v = $self->{PARENT}->Bitmap(-file => $v);
+      } elsif ($v =~ /\.xpm$/) {
+	$v = $self->{PARENT}->Pixmap(-file => $v);
+      } else { # reset
+	$v = 'image-zooz';
+      }
+
+    } elsif ($v && $ZooZ::Options::options{$k}[0] eq 'VarRef') {
+      no strict;
+      $v =~ s/^..//;
+      $v = \$ {"main::$v"};
+    }
+
+    $ref->{WCONF}{$k} = $v if $v;
+  }
+
+  for my $k (keys %{$ref->{ECONF}}) {
+    my $v = $data->{ECONF}{$k};
+
+    $ref->{ECONF}{$k} = $v if $v;
+  }
+
+  # make sure it is of the proper span.
+  $obj->resizeWidget('EXPAND_H') for 1 .. $csp - 1;
+  $obj->resizeWidget('EXPAND_V') for 1 .. $rsp - 1;
+
+  # must update the preview window.
+  $obj->updatePreviewWindow;
+
+  # add it to the global hash.
+  $obj->{ALL_WIDGETS}{$nam} = $ref->{PREVIEW};
+}
+
+#################
+#
+# This method takes a filehandle as input and dumps
+# the Perl code for every widget in the project.
+#
+#################
+
+sub dumpPerl {
+  my ($self, $fh, $parent) = @_;
+
+  $parent ||= '$MW';
+
+  # sort by col then row number.
+  for my $lab (sort
+	       {
+		 $self->{LABEL2GRID}{$a}[1] <=> $self->{LABEL2GRID}{$b}[1]
+		   or
+		 $self->{LABEL2GRID}{$a}[0] <=> $self->{LABEL2GRID}{$b}[0];
+
+	       } keys %{$self->{LABEL2GRID}}) {
+
+    my ($row, $col) = @{$self->{LABEL2GRID}{$lab}};
+    my $ref         = $self->{GRID}[$row][$col];
+
+    my @pairs;
+
+    # Is it scrolled?
+    if ($ref->{ECONF}{SCROLLON}) {
+
+      # where to place the scrollbars?
+      my $sloc = '';
+      for my $dir (qw/H V/) {
+	next unless $ref->{ECONF}{"$ {dir}SCROLLLOC"};
+	$sloc .= 'o' if $ref->{ECONF}{"$ {dir}OPTIONAL"};
+	$sloc .= $ref->{ECONF}{"$ {dir}SCROLLLOC"};
+      }
+
+      print $fh "
+
+# Widget $ref->{NAME} isa $ref->{WIDGET}
+\$ZWIDGETS{$ref->{NAME}} = $parent->Scrolled('$ref->{WIDGET}',";
+
+      push @pairs => [-scrollbars => "'$sloc'"];
+
+    } else {
+      print $fh "
+
+# Widget $ref->{NAME} isa $ref->{WIDGET}
+\$ZWIDGETS{$ref->{NAME}} = $parent->$ref->{WIDGET}(";
+    };
+
+    for my $k (sort keys %{$ref->{WCONF}}) {
+
+      # consider only the ones that changed.
+      my $tiedObj = tied $ref->{WCONF}{$k};
+      next if $tiedObj && ref($tiedObj) eq 'ZooZ::TiedVar' && !$tiedObj->{C};
+
+      my $v = $ref->{WCONF}{$k};
+      next unless defined $v && $v =~ /./;  # match 0
+
+      if ($v && exists $ZooZ::Options::options{$k} &&
+	  $ZooZ::Options::options{$k}[0] eq 'Image') {
+
+	eval {$v = $ref->{WCONF}{$k}->cget('-file')};
+      } elsif ($v && exists $ZooZ::Options::options{$k} &&
+	       $ZooZ::Options::options{$k}[0] eq 'Callback') {
+
+	$v = $::CALLBACKOBJ->code2name($v);
+
+      } elsif ($v && exists $ZooZ::Options::options{$k} &&
+	       $ZooZ::Options::options{$k}[0] eq 'VarRef') {
+
+	$v = "\\" . $::VARREFOBJ->ref2name($v);
+	$v =~ s/main:://;
+      }
+
+      # quote it if it's a bareword. IE. Unless it's a ref or a number.
+      $v = "'$v'" unless $v =~ m{
+				 ^[-\d]+$   # a number
+				 |
+				 ^\\       # a reference
+				}x;
+
+      push @pairs => [$k, $v];
+    }
+
+    if (@pairs) {
+      print $fh "\n", lineUpCommas(@pairs), "\n  )->grid(";
+
+    } else {
+      print $fh ")->grid(";
+    }
+
+    # Now place it via grid().
+    @pairs = ([-row    => $row],
+	      [-column => $col],
+	     );
+
+    push @pairs => [-rowspan    => $ref->{ROWS}] if $ref->{ROWS} > 1;
+    push @pairs => [-columnspan => $ref->{COLS}] if $ref->{COLS} > 1;
+
+    $ref->{PCONF}{$_} &&
+      push @pairs => [$_ => $ref->{PCONF}{$_} =~ /^\d+$/ ?
+		      $ref->{PCONF}{$_} : "'$ref->{PCONF}{$_}'"
+		     ] for qw/-sticky -ipadx -ipady -padx -pady/;
+
+    print $fh "\n", lineUpCommas(@pairs), "\n  );";
+
+    # if a container, then call recursively.
+    if (exists $self->{SUBHIERS}{$lab}) {
+      $self->{SUBHIERS}{$lab}->dumpPerl($fh, '$ZWIDGETS{' . $ref->{NAME} . '}');
+    }
+  }
+
+  # Now output any row/col specific options like greediness, etc ..
+  {
+    my ($cols, $rows) = $self->{PREVIEW}->gridSize;
+
+    # first the columns.
+    for my $col (0 .. $cols - 1) {
+      # get the minsize/weight/pad data.
+      my %data = $self->{PREVIEW}->gridColumnconfigure($col);
+
+      my @data = map [$_, $data{$_}] => grep $data{$_} => keys %data;
+      @data or next;
+
+      print $fh "\n$parent->gridColumnconfigure($col,\n",
+	lineUpCommas(@data), "\n  );\n";
+    }
+
+    # then the rows.
+    for my $row (0 .. $rows - 1) {
+      # get the minsize/weight/pad data.
+      my %data = $self->{PREVIEW}->gridRowconfigure($row);
+
+      my @data = map [$_, $data{$_}] => grep $data{$_} => keys %data;
+      @data or next;
+
+      print $fh "\n$parent->gridRowconfigure($row,\n",
+	lineUpCommas(@data), "\n  );\n";
+    }
+  }
+}
+
+sub lineUpCommas {
+  my $len = (sort {$b <=> $a} map length $_->[0] => @_)[0];
+  return join "\n" => map {sprintf "   %-$ {len}s => %s," => @$_} @_;
+}
+
+#############
+#
+# This method is called when a user closes a project.
+# It destroys everything.
+#
+#############
+
+sub closeMe {
+  my $self = shift;
+
+  $_ = undef for values %{$self->{SUBHIERS}};
+
+  # did I miss anything?
 }
 
 ##############################
@@ -1060,6 +1817,9 @@ sub configureCol {
 # $self->{GRID}[$row][$column]{COLS}     = number of cols widget is occupying
 # $self->{GRID}[$row][$column]{MASTER}   = label of widget in the top left grid
 # $self->{GRID}[$row][$column]{PREVIEW}  = preview widget object
+# $self->{GRID}[$row][$column]{WCONF}    = hash of widget configuration options.
+# $self->{GRID}[$row][$column]{PCONF}    = hash of widget placement options.
+# $self->{GRID}[$row][$column]{ECONF}    = hash of extra widget options.
 #
 # $self->{LABEL2GRID}{$label}            = [row, col] of labels of widgets
 #
@@ -1075,6 +1835,12 @@ sub configureCol {
 # $self->{TREE}                          = hierarchy list
 # $self->{SUBHIERS}{$label}              = project object of container widgets only.
 # $self->{PREVIEW}                       = Toplevel (or parent frame) of preview window.
+# $self->{LEVEL}                         = which hier level this object is at
+#
+# $self->{ALL_WIDGETS}{$name}            = Preview widget. For use in callbacks by users.
+#
+# $self->{ROWOPT}                        = hash of row config options.
+# $self->{COLOPT}                        = hash of col config options.
 #
 
 1;

@@ -1,801 +1,1001 @@
 
 package ZooZ::Forms;
 
-# this implements all the forms in a "clean" way.
-# unfortunately, it's not as clean as I'd like it to be!
-# MUST RE-WRITE!!
+#
+# This package implements all the forms for ZooZ.
+# These include:
+# 1. new project form.
+# 2. configure widget form.
+# 3. choose font form.
+# 4. choose callback form.
+# 5. choose variable form.
 
 use strict;
-use Tk;
-use Tk::LabFrame;
-use Tk::ROText;
-use Tk::DialogBox;
-use Tk::Dialog;
+use Storable;  # remove an error from Tk::CodeText
+
+use ZooZ::Fonts;
+use ZooZ::Callbacks;
+use ZooZ::Options;
+use ZooZ::Generic;
+use ZooZ::varRefs;
+use ZooZ::TiedVar;
+
 use Tk::Font;
 use Tk::Pane;
+use Tk::Dialog;
+use Tie::Watch;
 
-use ZooZ::Options;
-use ZooZ::Fonts;
+my (
+    %FORMS,        # a list of all forms and their titles.
+    %TOPLEVEL,     # to hold the toplevel widgets of all forms.
 
-#
-# vars
-#
+    # Data for widget configuration
+    %CONFDATA,
 
-# the options to ignore. Those can't be (and shouldn't be)
+    # Data for Fonts.
+    %FONTDATA,
+
+    # Data for varRefs.
+    %VARDATA,
+
+    # Data for callbacks
+    %CBDATA,
+
+    # Data for row/col conf.
+    %ROWCOLDATA,
+
+    %ignoreOptions,   # options to be hidden from user
+   );
+
+%FORMS = (
+	  #newProject      => 'Create New Project',
+	  configureWidget => 'Configure Widget',
+	  chooseFont      => 'Choose/Create Font',
+	  chooseCallback  => 'Choose/Create Callback',
+	  chooseVarRef    => 'Choose/Create Variable',
+	  configureRowCol => 'Configure Row/Column',
+	 );
+
+# the options to ignore. Those can't (and shouldn't) be
 # exposed to the user.
-my %ignoreOptions = (
-		     -class => 1,
-		    );
+%ignoreOptions = (
+		  -class => 1,
+		 );
 
-# Just create one ZooZ::Fonts object.
-our $fontObj;
+# Sigils for vars.
+$VARDATA{SIGIL}= {
+		  Scalar => "\$",
+		  Array  => "\@",
+		  Hash   => "%"
+		 };
 
-my %Callbacks;
+###################
+#
+# This should be called as a static sub.
+# It creates toplevels for all the forms.
+#
+###################
 
-sub Callbacks {
+sub createAllForms {
+  my $mw = shift;
+
+  for my $form (keys %FORMS) {
+    my $t = $mw->Toplevel;
+
+    $t->withdraw;
+    $t->title   ($FORMS{$form});
+    $t->protocol(WM_DELETE_WINDOW => [$t => 'withdraw']);
+
+    my $setup = "setup_$form";
+    ZooZ::Forms->$setup($t);
+
+    $TOPLEVEL{$form} = $t;
+  }
+}
+
+###############
+#
+# Setup the form to configure the widgets.
+#
+###############
+
+sub setup_configureWidget {
+  my ($class, $top) = @_;
+
+  # Create a label that is easy to see to tell user what widget
+  # is being configured.
+  $top->Label(
+	      -textvariable => \$CONFDATA{WidgetName},
+	      -font         => 'WidgetName',
+	      -fg           => 'darkolivegreen',
+	      -bg           => 'white',
+	      -borderwidth  => 1,
+	      -relief       => 'ridge',
+	      -pady         => 5,
+	     )->pack(qw/-fill x -padx 5 -pady 5/);
+
+  # create the notebook.
+  $CONFDATA{NB} = $top->NoteBook(
+				 -borderwidth => 1,
+				)->pack(qw/-fill both -expand 1/);
+  $CONFDATA{NBWIDGET} = $CONFDATA{NB}->add('NBWIDGET', -label => 'Widget Specific');
+  $CONFDATA{NBPLACE}  = $CONFDATA{NB}->add('NBPLACE',  -label => 'Placement Specific');
+  $CONFDATA{NBEXTRA}  = $CONFDATA{NB}->add('NBEXTRA',  -label => 'Extra Properties');
+
+  # make things a bit nicer
+  for (qw/NBPLACE NBWIDGET NBEXTRA/) {
+    $CONFDATA{$_}->optionAdd('*Entry.BorderWidth'       => 1);
+    $CONFDATA{$_}->optionAdd('*Button.BorderWidth'      => 1);
+    $CONFDATA{$_}->optionAdd('*Checkbutton.BorderWidth' => 1);
+    $CONFDATA{$_}->optionAdd('*Radiobutton.BorderWidth' => 1);
+  }
+
+  # bind for mouse wheel.
+  ZooZ::Generic::BindMouseWheel($top, sub {
+				  my $r = $CONFDATA{NB}->raised;
+				  ($CONFDATA{$r}->packSlaves)[0];
+				});
+}
+
+###############
+#
+# Setup the font selection form
+#
+###############
+
+sub setup_chooseFont {
+  my ($class, $top) = @_;
+
+  $top->optionAdd("*$_.BorderWidth" => 1) for qw(Button
+						 Checkbutton
+						 Radiobutton
+						 Optionmenu
+						 Listbox);
+
+  my $f1 = $top->Frame->pack(qw/-side top -fill both -expand 1/);
+  my $f2 = $top->Labelframe(-text      => 'Sample Font',
+			    -height    => 200,
+			   )->pack(qw/-side bottom -fill x/);
+
+  my $f3 = $f1->Labelframe(-text   => 'Defined Fonts',
+			  )->pack(qw/-side left -fill both -expand 1/);
+  my $l3 = $f3->Scrolled(qw/Listbox -scrollbars se/,
+			 -exportselection => 0,
+			 -selectmode      => 'browse',
+			)->pack(qw/-fill both -expand 1/);
+
+  my $f4 = $f1->Labelframe(-text => 'Available Families',
+			)->pack(qw/-side left -fill both -expand 1/);
+  my $l4 = $f4->Scrolled(qw/Listbox -scrollbars se/,
+			 -exportselection => 0,
+			 -selectmode      => 'browse',
+			 -width => 30,
+			)->pack(qw/-fill both -expand 1/);
+
+  my $F4 = $f1->Frame->pack(qw/-side left -fill y -expand 0/);
+  my $f5 = $F4->Labelframe(-text     => 'Extra Options',
+			)->pack(qw/-side top -fill none -expand 0 -anchor n/);
+
+  $_->Subwidget('xscrollbar')->configure(-borderwidth => 1) for $l3, $l4;
+  $_->Subwidget('yscrollbar')->configure(-borderwidth => 1) for $l3, $l4;
+
+  # populate family list.
+  $l4->insert(end => $_) for sort $top->fontFamilies;
+
+  # populate registered font list.
+  $l3->insert(end => $_) for sort $::FONTOBJ->listAll;
+
+  $F4->Button(-text => 'Register Font',
+	      -command => sub {
+		my $name = "$FONTDATA{family} $FONTDATA{size} $FONTDATA{weight} $FONTDATA{slant} " .
+		  ($FONTDATA{underline} ? 'u ' : '') . ($FONTDATA{overstrike} ? 'o': '');
+
+		# don't do anything if font already exists.
+		return if $::FONTOBJ->FontExists($name);
+
+		# create it and register it.
+		my $obj = $top->fontCreate($name,
+					   map {
+					     '-' . $_ =>  $FONTDATA{$_}
+					   } qw/family size weight slant underline overstrike/);
+		$::FONTOBJ->add($name, $obj);
+
+		$l3->insert(end => $name);
+	      })->pack(qw/-side top -padx 5 -pady 0 -fill x/);
+
+  # DO I NEED THIS BUTTON??????
+  $F4->Button(-text => 'Delete Font',
+	      -command => sub {
+		my ($sel) = $l3->curselection;
+		defined $sel or return;
+
+		my $nam = $l3->get($sel);
+		my $ans = $top->Dialog
+		  (-title   => 'Are you sure?',
+		   -bitmap  => 'question',
+		   -buttons => [qw/Yes No/],
+		   -text    => <<EOT)->Show;
+Are you sure you want to delete
+font '$nam'?
+EOT
+  ;
+		return if $ans eq 'No';
+		$::FONTOBJ->remove($nam);
+		$l3->delete($sel);
+	      })->pack(qw/-side top -padx 5 -pady 0 -fill x/);
+
+  $F4->Button(-text => 'Return Selected',
+	      -command => sub {
+		my ($sel) = $l3->curselection;
+		$sel      = $l3->get($sel) if defined $sel;
+		$sel    ||= 'Default';
+
+		$FONTDATA{localReturn} = $sel;
+	      })->pack(qw/-side top -padx 5 -pady 0 -fill x/);
+
+  $F4->Button(-text    => 'Cancel',
+	      -command => [\&cancelForm, \%FONTDATA],
+	     )->pack(qw/-side top -padx 5 -pady 0 -fill x/);
+
+  my $sample         = $f2->Label(-text => "There's More Than One Way To Do It",
+				 )->pack(qw/-side top/);
+
+  my $default        = $sample->cget('-font');
+  if ($default =~ /\{(.+)\}\s+(\d+)/) {
+    $FONTDATA{family}   = $1;
+    $FONTDATA{size}     = $2;
+  } else {
+    $FONTDATA{family}   = '';
+    $FONTDATA{size}     = 8;
+  }
+
+  $FONTDATA{weight}     = 'normal';
+  $FONTDATA{slant}      = 'roman';
+  $FONTDATA{underline}  = 0;
+  $FONTDATA{overstrike} = 0;
+
+  for my $i (0 .. $l4->size - 1) {
+    next unless $l4->get($i) eq $FONTDATA{family};
+
+    $l4->selectionSet($i);
+    $l4->see($i);
+    last;
+  }
+
+
+  $f5->Label(-text => 'Size',
+	    )->grid(-column => 0, -row => 0, -sticky => 'w');
+  $f5->Optionmenu(-options => [5 .. 25],
+		  -textvariable => \$FONTDATA{size},
+		  -command      => [\&configureSampleFont, $sample],
+		 )->grid(-column => 1, -row => 0, -sticky => 'ew',
+			 -columnspan => 2);
+
+  $f5->Label(-text => 'Weight',
+	    )->grid(-column => 0, -row => 1, -sticky => 'w');
+  $f5->Radiobutton(-text => 'Normal',
+		   -value => 'normal',
+		   -variable => \$FONTDATA{weight},
+		   -command  => [\&configureSampleFont, $sample],
+		  )->grid(-column => 1, -row => 1, -sticky => 'w');
+  $f5->Radiobutton(-text => 'Bold',
+		   -value => 'bold',
+		   -variable => \$FONTDATA{weight},
+		   -command  => [\&configureSampleFont, $sample],
+		  )->grid(-column => 2, -row => 1, -sticky => 'w');
+
+  $f5->Label(-text => 'Slant',
+	    )->grid(-column => 0, -row => 2, -sticky => 'w');
+  $f5->Radiobutton(-text => 'Normal',
+		   -value => 'roman',
+		   -variable => \$FONTDATA{slant},
+		   -command  => [\&configureSampleFont, $sample],
+		  )->grid(-column => 1, -row => 2, -sticky => 'w');
+  $f5->Radiobutton(-text => 'Italic',
+		   -value => 'italic',
+		   -variable => \$FONTDATA{slant},
+		   -command  => [\&configureSampleFont, $sample],
+		  )->grid(-column => 2, -row => 2, -sticky => 'w');
+
+  $f5->Label(-text => 'Underline',
+	    )->grid(-column => 0, -row => 3, -sticky => 'w');
+  $f5->Checkbutton(-text => 'Yes/No',
+		   -variable => \$FONTDATA{underline},
+		   -command  => [\&configureSampleFont, $sample],
+		  )->grid(-column => 1, -row => 3, -sticky => 'ew',
+			  -columnspan => 2);
+
+  $f5->Label(-text => 'Overstrike',
+	    )->grid(-column => 0, -row => 4, -sticky => 'w');
+  $f5->Checkbutton(-text => 'Yes/No',
+		   -variable => \$FONTDATA{overstrike},
+		   -command  => [\&configureSampleFont, $sample],
+		  )->grid(-column => 1, -row => 4, -sticky => 'ew',
+			  -columnspan => 2);
+
+  # when user selects a registered font, update the other widgets.
+  $l3->bind('<1>' => sub {
+	      my ($sel) = $l3->curselection;
+	      defined $sel or return;
+
+	      $sel    = $l3->get($sel);
+	      my $obj = $::FONTOBJ->obj($sel);
+
+	      # update all the vars.
+	      for my $o (qw/family size weight slant underline overstrike/) {
+		$FONTDATA{$o} = $obj->configure("-$o");
+	      }
+
+	      # configure the sample.
+	      $sample->configure(-font => $obj);
+
+	      # select the correct entry in the list of available fonts.
+	      for my $i (0 .. $l4->size - 1) {
+		next unless $l4->get($i) eq $FONTDATA{family};
+		$l4->selectionClear(qw/0.0 end/);
+		$l4->selectionSet($i);
+		$l4->see($i);
+		last;
+	      }
+	    });
+
+  # when user selects a new font, update the sample and some vars.
+  $l4->bind('<1>' => sub {
+	      my ($sel) = $l4->curselection;
+	      defined $sel or return;
+
+	      $l3->selectionClear(qw/0.0 end/);
+	      $FONTDATA{family} = $l4->get($sel);
+	      configureSampleFont($sample);
+	    });
+
+  # to take care of waitVariable.
+  $top->protocol(WM_DELETE_WINDOW => sub {
+		   $FONTDATA{localReturn} = '';
+		 });
+}
+
+sub setup_chooseCallback {
   # this form let's users add/delete callbacks/subroutines.
   # as a side effect, it returns the name of the
   # selected callback so it can be used to assign
   # callbacks to -command arguments.
-  my (
-      $class,
-      $mw,
-      $cb,   # ZooZ::Callbacks object
-     ) = @_;
+  my ($class, $top) = @_;
 
-  unless (exists $Callbacks{form}) {
-    # create this only once
-    my $t = $mw->Toplevel;
-    $t->withdraw;
-    $t->title('Subroutine Definitions');
-    $t->protocol(WM_DELETE_WINDOW => sub {
-		   $t->withdraw;
-		   return undef;
-		 });
-
-    my $f1 = $t->Labelframe(
-#			    -label     => 'Defined Subroutines',
-#			    -labelside => 'acrosstop',
-			    -text      => 'Defined Subroutines',
+  my $f1 = $top->Labelframe(-text      => 'Defined Subroutines',
 			   )->pack(qw/-side top -fill both -expand 1/);
-    my $f2 = $t->Frame->pack(qw/-side bottom -fill x -padx 5 -pady 5/);
 
-    my $l  = $f1->Scrolled(qw/Listbox -scrollbars se/,
-			   -selectmode => 'single',
-			   -width => 40,
-			  )->pack(qw/-side left -fill y/);
+  my $f2 = $top->Frame->pack(qw/-side bottom -fill x -padx 5 -pady 5/);
 
-    my $r  = $f1->Scrolled(qw/ROText -scrollbars se/,
-			   -width  => 60,
-			   #-height => 20,
-			  )->pack(qw/-side left -fill both -expand 1/);
+  my $l  = $f1->Scrolled(qw/Listbox -scrollbars se/,
+			 -selectmode => 'single',
+			 -width => 40,
+			)->pack(qw/-side left -fill y/);
 
-    $Callbacks{form} = $t;
-    $Callbacks{text} = $r;
-    $Callbacks{list} = $l;
+  eval " require Tk::CodeText ";
 
-    $l->bind('<1>' => sub {
-	       my ($sel) = $l->curselection;
-	       defined $sel or return;
+  my @textWidget = $@ ? ('Text') : ('CodeText',
+				    -disablemenu => 1, # no idea
+				    -syntax      => 'Perl',
+				   );
 
-	       $sel     = $l ->get($sel);
-	       my $code = $cb->code($sel);
-	       $Callbacks{text}->delete(qw/0.0 end/);
-	       $Callbacks{text}->insert(end => $code);
-	     });
+  my $r  = $f1->Scrolled(@textWidget,
+			 -scrollbars => 'se',
+			 -width      => 60,
+			)->pack(qw/-side left -fill both -expand 1/);
 
-    $f2->Button(-text    => 'Add Subroutine',
-		-height  => 2,
-		-command => sub {
-		  my $name = $cb->newName;
+  $r->bind('<Key>' => sub {
+	     return unless $CBDATA{selected};
 
-		  unless (exists $Callbacks{newN}) {
-		    my $d = $t->DialogBox(-buttons => [qw/Ok Cancel/],
-					  -popover => $t);
+	     $::CALLBACKOBJ->code($CBDATA{selected}, $r->get(qw/0.0 end/));
+	   });
 
-		    my $f = $d->LabFrame(-label => 'Enter Unique Subroutine Name',
-					 -labelside => 'acrosstop',
+  $CBDATA{list} = $l;
+
+  $l->bind('<1>' => sub {
+	     my ($sel) = $l->curselection;
+	     #defined $sel or return;
+	     defined $sel or do {
+	       $CBDATA{selected} = '';
+	       return;
+	     };
+
+	     $sel     = $l ->get($sel);
+	     my $code = $::CALLBACKOBJ->code($sel);
+	     $r->delete(qw/0.0 end/);
+	     $r->insert(end => $code);
+
+	     $CBDATA{selected} = $sel;
+	   });
+
+  $f2->Button(-text    => 'Add Subroutine',
+	      -height  => 2,
+	      -command => sub {
+		my $name = $::CALLBACKOBJ->newName;
+
+		unless (exists $CBDATA{newN}) {
+		  my $d = $top->DialogBox(-title   => 'New Subroutine',
+					  -buttons => [qw/Ok Cancel/],
+					  -popover => $top);
+
+		  my $f = $d->Labelframe(-text => 'Enter Unique Subroutine Name',
 					)->pack(qw/-fill both -expand 1/);
 
-		    $Callbacks{newN}   = $d;
-		    $Callbacks{newN_e} = $f->Entry->pack;
-		  }
+		  $CBDATA{newN}   = $d;
+		  $CBDATA{newN_e} = $f->Entry->pack;
+		}
 
-		  my $e = $Callbacks{newN_e};
+		my $e = $CBDATA{newN_e};
 
-		  do {
-		    $e->delete(qw/0.0 end/);
-		    $e->insert(0.0 => $name);
-		    $e->selectionRange(qw/0.0 end/);
-		    $e->focus;
+		do {
+		  $e->delete(qw/0.0 end/);
+		  $e->insert(0.0 => $name);
+		  $e->selectionRange(qw/0.0 end/);
+		  $e->focus;
 
-		    my $ans = $Callbacks{newN}->Show;
-		    return if $ans eq 'Cancel';
+		  my $ans = $CBDATA{newN}->Show;
+		  return if $ans eq 'Cancel';
 
-		    $name = $e->get;
-		  } while $cb->CallbackExists($name);
+		  $name = $e->get;
+		  $name =~ s/\W/_/g; # make sure it's legal
+		  #$name = 'main::' . $name unless $name =~ /::/;
+		  $name =~ s/^(?:.*::)?/main::/;  # only main allowed.
+		} while $::CALLBACKOBJ->CallbackExists($name);
 
-		  $cb->add($name, "sub $name {
 
-}");
+		$::CALLBACKOBJ->add($name, <<EOT);
+# To rename the sub, use the button below.
+sub $name {
 
-		  # add it to listbox.
-		  #cbAddToListbox($cb, $name);
-		  $Callbacks{list}->insert(end => $name);
-		  $Callbacks{list}->selectionSet('end');
+}
+EOT
+  ;
 
-		  my $code = $cb->code($name);
-		  $Callbacks{text}->delete(qw/0.0 end/);
-		  $Callbacks{text}->insert(end => $code);
-		})->pack(qw/-side left -fill x -expand 1/);
+		# add it to listbox.
+		$l->insert(end => $name);
+		$l->selectionSet('end');
 
-    $f2->Button(-text    => 'Delete Selected Sub',
-		-height  => 2,
-		-command => sub {
-		  my ($sel) = $Callbacks{list}->curselection;
-		  defined $sel or return;
+		my $code = $::CALLBACKOBJ->code($name);
+		$r->delete(qw/0.0 end/);
+		$r->insert(end => $code);
 
-		  my $nam = $Callbacks{list}->get($sel);
-		  my $ans = $Callbacks{form}->Dialog
-		    (-title   => 'Are you sure?',
-		     -bitmap  => 'question',
-		     -buttons => [qw/Yes No/],
-		     -text    => <<EOT)->Show;
+		# select it
+		$CBDATA{selected} = $name;
+
+	      })->pack(qw/-side left -fill x -expand 1/);
+
+  # AGAIN: Do I really need this?
+  if (0) {
+  $f2->Button(-text    => 'Delete Selected Sub',
+	      -height  => 2,
+	      -command => sub {
+		my ($sel) = $l->curselection;
+		defined $sel or return;
+
+		my $nam = $l->get($sel);
+		my $ans = $top->Dialog
+		  (-title   => 'Are you sure?',
+		   -bitmap  => 'question',
+		   -buttons => [qw/Yes No/],
+		   -font    => 'Questions',
+		   -text    => <<EOT)->Show;
 Are you sure you want to delete
 callback '$nam' with its
 associated code?
 EOT
   ;
-		  return if $ans eq 'No';
-		  $cb->remove($nam);
-		  $Callbacks{list}->delete($sel);
-		  $Callbacks{text}->delete(qw/0.0 end/);
-		})->pack(qw/-side left -fill x -expand 1/);
-
-    $f2->Button(-text    => 'Rename Selected Sub',
-		-height  => 2,
-		-command => sub {
-		  my ($sel) = $Callbacks{list}->curselection;
-		  defined $sel or return;
-
-		  my $name = $Callbacks{list}->get($sel);
-
-		  unless (exists $Callbacks{rename}) {
-		    my $d = $t->DialogBox(-buttons => [qw/Ok Cancel/],
-					  -popover => $t);
-
-		    my $f = $d->LabFrame(-label => 'Enter Unique Subroutine Name',
-					 -labelside => 'acrosstop',
-					)->pack(qw/-fill both -expand 1/);
-
-		    $Callbacks{rename}   = $d;
-		    $Callbacks{rename_e} = $f->Entry->pack;
-		  }
-
-		  my $e = $Callbacks{rename_e};
-
-		  my $oldName = $name;
-		  do {
-		    $e->delete(qw/0.0 end/);
-		    $e->insert(0.0 => $name);
-		    $e->selectionRange(qw/0.0 end/);
-		    $e->focus;
-
-		    my $ans = $Callbacks{rename}->Show;
-		    return if $ans eq 'Cancel';
-
-		    $name = $e->get;
-		  } while $cb->CallbackExists($name);
-
-		  $cb->rename($oldName => $name);
-		  $Callbacks{list}->delete($sel);
-		  $Callbacks{list}->insert($sel => $name);
-
-		  my $code = $cb->code($name);
-		  $code =~ s/\b(sub\s+)$oldName\b/${1}$name/;
-		  $cb->code($name, $code);
-		})->pack(qw/-side left -fill x -expand 1/);
-
-    $f2->Button(-text    => 'Edit Sub Code',
-		-height  => 2,
-		-command => sub {
-		})->pack(qw/-side left -fill x -expand 1/);
-
-    $f2->Button(-text    => 'Return Selected',
-		-height  => 2,
-		-command => sub {
-		  my ($sel) = $Callbacks{list}->curselection;
-		  $sel      = $Callbacks{list}->get($sel) if defined $sel;
-		  $Callbacks{form}->withdraw;
-		  return $sel;
-		})->pack(qw/-side left -fill x -expand 1/);
-  }
-
-  my $l = $Callbacks{list};
-  $l->delete(qw/0.0 end/);
-  $l->insert(end => $_) for $cb->listAll;
-
-  $Callbacks{form}->deiconify;
+		return if $ans eq 'No';
+		$::CALLBACKOBJ->remove($nam);
+		$l->delete($sel);
+		$r->delete(qw/0.0 end/);
+		# TBD: Must check if any widgets are using this
+		#      callback. If so, either fix that, or don't
+		#      delete the callback.
+	      })->pack(qw/-side left -fill x -expand 1/);
 }
 
-my %Fonts;
+  $f2->Button(-text    => 'Rename Selected Sub',
+	      -height  => 2,
+	      -command => sub {
+		my ($sel) = $l->curselection;
+		defined $sel or return;
 
-sub Fonts {
-  # this form let's users add/delete fonts.
-  # as a side effect, it returns the name of the
-  # selected font so it can be used to assign
-  # fonts.
+		my $name = $l->get($sel);
 
-  my (
-      $class,
-      $mw,
-      $fn,   # ZooZ::Fonts object
-      $return,
-     ) = @_;
+		unless (exists $CBDATA{rename}) {
+		  my $d = $top->DialogBox(-title   => 'Rename Callback',
+					  -buttons => [qw/Ok Cancel/],
+					  -popover => $top);
 
-  # if we got a real Tk::Font object, convert it to a ZooZ::Font object.
-  if (ref $fn eq 'Tk::Font') {
-    my $tmp = $fn;
-    $fn = new ZooZ::Fonts;
-
-    my $name = $fn->newName;
-    $fn->add($name, $tmp);
-  }
-
-  unless (exists $Fonts{form}) {
-    my $t = $mw->Toplevel;
-    #$t->withdraw;
-
-    $t->title('Font Definitions');
-    $t->protocol(WM_DELETE_WINDOW => sub {
-		   $t->withdraw;
-		   $t->grabRelease;
-
-		   #return $$return = 'Default';
-		   $Fonts{localReturn} = 'Default';
-		 });
-
-    my $f1 = $t->Frame->pack(qw/-side top -fill both -expand 1/);
-    my $f2 = $t->LabFrame(-label     => 'Sample Font',
-			  -labelside => 'acrosstop',
-			  -height    => 200,
-			 )->pack(qw/-side bottom -fill x/);
-
-    my $f3 = $f1->LabFrame(-label => 'Defined Fonts',
-			   -labelside => 'acrosstop',
-			   )->pack(qw/-side left -fill both -expand 1/);
-    my $l3 = $f3->Scrolled(qw/Listbox -scrollbars se/,
-			   -exportselection => 0,
-			   -selectmode      => 'browse',
-			  )->pack(qw/-fill both -expand 1/);
-
-    my $f4 = $f1->LabFrame(-label => 'Available Families',
-			   -labelside => 'acrosstop',
-			  )->pack(qw/-side left -fill both -expand 1/);
-    my $l4 = $f4->Scrolled(qw/Listbox -scrollbars se/,
-			   -exportselection => 0,
-			   -selectmode      => 'browse',
-			   -width => 30,
-			  )->pack(qw/-fill both -expand 1/);
-
-    my $F4 = $f1->Frame->pack(qw/-side left -fill y -expand 0/);
-    my $f5 = $F4->LabFrame(-label     => 'Extra Options',
-			   -labelside => 'acrosstop',
-			  )->pack(qw/-side top -fill none -expand 0 -anchor n/);
-
-    # populate family list.
-    $l4->insert(end => $_) for sort $mw->fontFamilies;
-
-    $F4->Button(-text => 'Register Font',
-		-command => sub {
-		  #my $name = $fn->newName;
-		  my $name = "$Fonts{family} $Fonts{size} $Fonts{weight} $Fonts{slant} " .
-		    ($Fonts{underline} ? 'u ' : '') . ($Fonts{overstrike} ? 'o': '');
-
-		  unless (exists $Fonts{newN}) {
-		    my $d = $t->DialogBox(-buttons => [qw/Ok Cancel/],
-					  -popover => $t);
-
-		    my $f = $d->LabFrame(-label => 'Enter Unique Font Name',
-					 -labelside => 'acrosstop',
+		  my $f = $d->Labelframe(-text => 'Enter Unique Subroutine Name',
 					)->pack(qw/-fill both -expand 1/);
 
-		    $Fonts{newN}   = $d;
-		    $Fonts{newN_e} = $f->Entry->pack;
-		  }
+		  $CBDATA{rename}   = $d;
+		  $CBDATA{rename_e} = $f->Entry->pack;
+		}
 
-		  my $e = $Fonts{newN_e};
+		my $e = $CBDATA{rename_e};
 
-		  do {
-		    $e->delete(qw/0.0 end/);
-		    $e->insert(0.0 => $name);
-		    $e->selectionRange(qw/0.0 end/);
-		    $e->focus;
+		my $oldName = $name;
+		$name =~ s/main:://;
+		do {
+		  $e->delete(qw/0.0 end/);
+		  $e->insert(0.0 => $name);
+		  $e->selectionRange(qw/0.0 end/);
+		  $e->focus;
 
-		    my $ans = $Fonts{newN}->Show;
-		    return if $ans eq 'Cancel';
+		  my $ans = $CBDATA{rename}->Show;
+		  return if $ans eq 'Cancel';
 
-		    $name = $e->get;
-		  } while $fn->FontExists($name);
+		  $name = $e->get;
+		  $name =~ s/\W/_/g; # make sure it's legal
+		  #$name = 'main::' . $name unless $name =~ /::/;
+		  $name =~ s/^(?:.*::)?/main::/;  # only main allowed
+		} while $::CALLBACKOBJ->CallbackExists($name);
+		
+		$::CALLBACKOBJ->rename($oldName => $name);
+		$l->delete($sel);
+		$l->insert($sel => $name);
 
-		  my $obj = $mw->fontCreate($name,
-					    map {
-					      '-' . $_ =>  $Fonts{$_}
-					    } qw/family size weight slant underline overstrike/);
-		  $fn->add($name, $obj);
+		my $code = $::CALLBACKOBJ->code($name);
+		$code =~ s/\b(sub\s+)$oldName\b/$ {1}$name/;
+		$::CALLBACKOBJ->code($name, $code);
 
-		  $l3->insert(end => $name);
-		})->pack(qw/-side top -padx 5 -pady 0 -fill x/);
+		# stick it back
+		$r->delete(qw/0.0 end/);
+		$r->insert(end => $code);
+	      })->pack(qw/-side left -fill x -expand 1/);
 
-    $F4->Button(-text => 'Delete Font',
-		-command => sub {
-		  my ($sel) = $Fonts{fontlist}->curselection;
-		  defined $sel or return;
+  $f2->Button(-text    => 'Return Selected',
+	      -height  => 2,
+	      -command => sub {
+		my ($sel) = $l->curselection;
+		defined $sel || return $CBDATA{localReturn} = '';
 
-		  my $nam = $Fonts{fontlist}->get($sel);
-		  my $ans = $Fonts{form}->Dialog
-		    (-title   => 'Are you sure?',
-		     -bitmap  => 'question',
-		     -buttons => [qw/Yes No/],
-		     -text    => <<EOT)->Show;
+		$sel      = $l->get($sel) if defined $sel;
+
+		# before we return, eval the subroutine, unless
+		# it has been evaled before.
+		my $code = $::CALLBACKOBJ->code($sel);
+
+		{
+		  no strict;
+		  no warnings;
+
+		  $code =~ s/sub \Q$sel/sub /;
+		  *{"main::$sel"} = eval "package main; $code";
+		}
+
+		$CBDATA{localReturn} = $sel;
+	      })->pack(qw/-side left -fill x -expand 1/);
+
+  $f2->Button(-text    => 'Cancel',
+	      -height  => 2,
+	      -command => [\&cancelForm, \%CBDATA],
+	     )->pack(qw/-side left -fill x -expand 1/);
+
+  $l->delete(qw/0.0 end/);
+  $l->insert(end => $_) for $::CALLBACKOBJ->listAll;
+
+  # to take care of waitVariable.
+  $top->protocol(WM_DELETE_WINDOW => sub {
+		   $CBDATA{localReturn} = '';
+		 });
+}
+
+sub setup_chooseVarRef {
+  my ($class, $top) = @_;
+
+  my $f1 = $top->Labelframe(-text      => 'Defined Variables',
+			   )->pack(qw/-side top -fill both -expand 1/);
+  my $f2 = $top->Frame->pack(qw/-side bottom -fill x -padx 5 -pady 5/);
+
+  my $l  = $f1->Scrolled(qw/Listbox -scrollbars se/,
+			 -selectmode  => 'single',
+			 -width       => 40,
+			 -borderwidth => 1,
+			)->pack(qw/-side left -fill both -expand 1/);
+
+  $VARDATA{list} = $l;
+
+  $l->bind('<1>' => sub {
+	     my ($sel) = $l->curselection;
+	     defined $sel or do {
+	       $VARDATA{selected} = '';
+	       return;
+	     };
+
+	     $VARDATA{selected} = $sel;
+	   });
+
+  $f2->Button(-text    => 'New Variable',
+	      -height  => 2,
+	      -command => sub {
+		my $name = $::VARREFOBJ->newName;
+
+		unless (exists $VARDATA{newN}) {
+		  my $d = $top->DialogBox(-title   => 'New Variable',
+					  -buttons => [qw/Ok Cancel/],
+					  -popover => $top);
+
+		  my $f = $d->Labelframe(-text => 'Enter Unique Variable Name',
+					)->pack(qw/-fill both -expand 1/);
+
+		  $VARDATA{newN}   = $d;
+		  $VARDATA{newN_e} = $f->Entry->pack;
+		  $VARDATA{newN_t} = 'Scalar';
+
+		  $f->Radiobutton(-text     => $_,
+				  -variable => \$VARDATA{newN_t},
+				  -value    => $_,
+				 )->pack(qw/-fill x/) for qw/Scalar Array Hash/;
+		}
+
+		my $e = $VARDATA{newN_e};
+
+		do {
+		  $e->delete(qw/0.0 end/);
+		  $e->insert(0.0 => $name);
+		  $e->selectionRange(qw/0.0 end/);
+		  $e->focus;
+
+		  my $ans = $VARDATA{newN}->Show;
+		  return if $ans eq 'Cancel';
+
+		  $name = $e->get;
+		} while $::VARREFOBJ->varRefExists($name);
+
+		if ($name =~ /^\w/) {  # add sigil if user didn't specify one.
+		  my $type = $VARDATA{newN_t};
+		  $name    = $VARDATA{SIGIL}{$type} . $name;
+		}
+
+		$::VARREFOBJ->add($name);
+
+		# add it to listbox.
+		$l->insert(end => $name);
+		$l->selectionSet('end');
+
+		# select it
+		$VARDATA{selected} = $name;
+
+	      })->pack(qw/-side left -fill x -expand 1/);
+
+  # do I need this?
+  if (0) {
+  $f2->Button(-text    => 'Delete Selected Variable',
+	      -height  => 2,
+	      -command => sub {
+		my ($sel) = $l->curselection;
+		defined $sel or return;
+
+		my $nam = $l->get($sel);
+		my $ans = $top->Dialog
+		  (-title   => 'Are you sure?',
+		   -bitmap  => 'question',
+		   -buttons => [qw/Yes No/],
+		   -font    => 'Questions',
+		   -text    => <<EOT)->Show;
 Are you sure you want to delete
-font '$nam'?
+variable '$nam'?
 EOT
   ;
-		  return if $ans eq 'No';
-		  $fn->remove($nam);
-		  $Fonts{fontlist}->delete($sel);
-		})->pack(qw/-side top -padx 5 -pady 0 -fill x/);
+		return if $ans eq 'No';
+		$::VARREFOBJ->remove($nam);
+		$l->delete($sel);
 
-    $F4->Button(-text => 'Return Selected',
-		-command => sub {
-		  my ($sel) = $Fonts{fontlist}->curselection;
-		  $sel      = $Fonts{fontlist}->get($sel) if defined $sel;
-		  $sel    ||= 'Default';
+		## TBD: check for any widgets that are using this variable
+		##      and update them.
+	      })->pack(qw/-side left -fill x -expand 1/);
+} # delete button
 
-		  $Fonts{form}->withdraw;
-		  $Fonts{form}->grabRelease;
+  $f2->Button(-text    => 'Initialize Variable',
+	      -height  => 2,
+	      -command => [\&initSelectedVar, $top, $l],
+	     )->pack(qw/-side left -fill x -expand 1/);
 
-		  return $Fonts{localReturn} = $sel;
-		})->pack(qw/-side top -padx 5 -pady 0 -fill x/);
+  $f2->Button(-text    => 'Return Selected',
+	      -height  => 2,
+	      -command => sub {
+		my ($sel)             = $l->curselection;
+		$VARDATA{localReturn} = $l->get($sel) if defined $sel;
+	      })->pack(qw/-side left -fill x -expand 1/);
 
-    my $sample         = $f2->Label(-text => "There's More Than One Way To Do It",
-				   )->pack(qw/-side top/);# -fill both -expand 1/);
+  $f2->Button(-text    => 'Cancel',
+	      -height  => 2,
+	      -command => [\&cancelForm, \%VARDATA],
+	     )->pack(qw/-side left -fill x -expand 1/);
 
-    my $default        = $sample->cget('-font');
-    if ($default =~ /\{(.+)\}\s+(\d+)/) {
-      $Fonts{family}   = $1;
-      $Fonts{size}     = $2;
-    } else {
-      $Fonts{family}   = '';
-      $Fonts{size}     = 8;
-    }
-
-    $Fonts{weight}     = 'normal';
-    $Fonts{slant}      = 'roman';
-    $Fonts{underline}  = 0;
-    $Fonts{overstrike} = 0;
-
-    for my $i (0 .. $l4->size - 1) {
-      next unless $l4->get($i) eq $Fonts{family};
-      $l4->selectionSet($i);
-      $l4->see($i);
-    }
-
-    $sample->configure(
-		       -font => [$Fonts{family},
-				 $Fonts{size},
-				 $Fonts{weight},
-				 $Fonts{slant},
-				 $Fonts{underline}  ? 'underline'  : (),
-				 $Fonts{overstrike} ? 'overstrike' : ()],
-		      );
-
-    $f5->Label(-text => 'Size',
-	      )->grid(-column => 0, -row => 0, -sticky => 'w');
-    $f5->Optionmenu(-options => [5 .. 25],
-		    -textvariable => \$Fonts{size},
-		    -command      => sub {
-		      $sample->configure(
-					 -font => [$Fonts{family},
-						   $Fonts{size},
-						   $Fonts{weight},
-						   $Fonts{slant},
-						   $Fonts{underline}  ? 'underline'  : (),
-						   $Fonts{overstrike} ? 'overstrike' : ()],
-					);
-		    })->grid(-column => 1, -row => 0, -sticky => 'ew',
-			   -columnspan => 2);
-
-    $f5->Label(-text => 'Weight',
-	      )->grid(-column => 0, -row => 1, -sticky => 'w');
-    $f5->Radiobutton(-text => 'Normal',
-		     -value => 'normal',
-		     -variable => \$Fonts{weight},
-		     -command  => sub {
-		       $sample->configure(
-					  -font => [$Fonts{family},
-						    $Fonts{size},
-						    $Fonts{weight},
-						    $Fonts{slant},
-						    $Fonts{underline}  ? 'underline'  : (),
-						    $Fonts{overstrike} ? 'overstrike' : ()],
-					 );
-		     })->grid(-column => 1, -row => 1, -sticky => 'w');
-    $f5->Radiobutton(-text => 'Bold',
-		     -value => 'bold',
-		     -variable => \$Fonts{weight},
-		     -command  => sub {
-		       $sample->configure(
-					  -font => [$Fonts{family},
-						    $Fonts{size},
-						    $Fonts{weight},
-						    $Fonts{slant},
-						    $Fonts{underline}  ? 'underline'  : (),
-						    $Fonts{overstrike} ? 'overstrike' : ()],
-					 );
-		     })->grid(-column => 2, -row => 1, -sticky => 'w');
-
-    $f5->Label(-text => 'Slant',
-	      )->grid(-column => 0, -row => 2, -sticky => 'w');
-    $f5->Radiobutton(-text => 'Normal',
-		     -value => 'roman',
-		     -variable => \$Fonts{slant},
-		     -command  => sub {
-		       $sample->configure(
-					  -font => [$Fonts{family},
-						    $Fonts{size},
-						    $Fonts{weight},
-						    $Fonts{slant},
-						    $Fonts{underline}  ? 'underline'  : (),
-						    $Fonts{overstrike} ? 'overstrike' : ()],
-					 );
-		     })->grid(-column => 1, -row => 2, -sticky => 'w');
-    $f5->Radiobutton(-text => 'Italic',
-		     -value => 'italic',
-		     -variable => \$Fonts{slant},
-		     -command  => sub {
-		       $sample->configure(
-					  -font => [$Fonts{family},
-						    $Fonts{size},
-						    $Fonts{weight},
-						    $Fonts{slant},
-						    $Fonts{underline}  ? 'underline'  : (),
-						    $Fonts{overstrike} ? 'overstrike' : ()],
-					 );
-		     })->grid(-column => 2, -row => 2, -sticky => 'w');
-
-    $f5->Label(-text => 'Underline',
-	      )->grid(-column => 0, -row => 3, -sticky => 'w');
-    $f5->Checkbutton(-text => 'Yes/No',
-		     -variable => \$Fonts{underline},
-		     -command  => sub {
-		       $sample->configure(
-					  -font => [$Fonts{family},
-						    $Fonts{size},
-						    $Fonts{weight},
-						    $Fonts{slant},
-						    $Fonts{underline}  ? 'underline'  : (),
-						    $Fonts{overstrike} ? 'overstrike' : ()],
-					 );
-		     })->grid(-column => 1, -row => 3, -sticky => 'ew',
-			   -columnspan => 2);
-
-    $f5->Label(-text => 'Overstrike',
-	      )->grid(-column => 0, -row => 4, -sticky => 'w');
-    $f5->Checkbutton(-text => 'Yes/No',
-		     -variable => \$Fonts{overstrike},
-		     -command  => sub {
-		       $sample->configure(
-					  -font => [$Fonts{family},
-						    $Fonts{size},
-						    $Fonts{weight},
-						    $Fonts{slant},
-						    $Fonts{underline}  ? 'underline'  : (),
-						    $Fonts{overstrike} ? 'overstrike' : ()],
-					 );
-		     })->grid(-column => 1, -row => 4, -sticky => 'ew',
-			      -columnspan => 2);
-
-    $l3->bind('<1>' => sub {
-		my ($sel) = $l3->curselection;
-		defined $sel or return;
-
-		$sel    = $l3->get($sel);
-		my $obj = $fn->obj($sel);
-
-		for my $o (qw/family size weight slant underline overstrike/) {
-		  $Fonts{$o} = $obj->configure("-$o");
-		}
-
-		$sample->configure(-font => $obj);
-
-		for my $i (0 .. $l4->size - 1) {
-		  next unless $l4->get($i) eq $Fonts{family};
-		  $l4->selectionClear(qw/0.0 end/);
-		  $l4->selectionSet($i);
-		  $l4->see($i);
-		}
-	      });
-
-    $l4->bind('<1>' => sub {
-		my ($sel) = $l4->curselection;
-		defined $sel or return;
-
-		$l3->selectionClear(qw/0.0 end/);
-		$Fonts{family} = $l4->get($sel);
-		$sample->configure(
-				   -font => [$Fonts{family},
-					     $Fonts{size},
-					     $Fonts{weight},
-					     $Fonts{slant},
-					     $Fonts{underline}  ? 'underline'  : (),
-					     $Fonts{overstrike} ? 'overstrike' : ()],
-				  );
-	      });
-
-    $Fonts{form}       = $t;
-    $Fonts{fontlist}   = $l3;
-    $Fonts{familylist} = $l4;
-  }
-
-  my $l = $Fonts{fontlist};
-  $l->delete(qw/0.0 end/);
-  $l->insert(end => $_) for $fn->listAll;
-
-  $Fonts{form}->deiconify;
-  $Fonts{form}->grab;
-  $Fonts{form}->raise;
-  $Fonts{form}->waitVariable(\$Fonts{localReturn});
-
-  $$return = $Fonts{localReturn};
-}
-
-my %projectData;
-
-sub projectData {
-  my ($class, $mw,
-      $name, # optional .. to end
-      $title,
-      $rows,
-      $cols,
-     ) = @_;
-
-  unless (exists $projectData{form}) {
-    my $top = $mw->Toplevel;
-    $top->withdraw;
-    $top->title('Project Settings');
-    $top->protocol(WM_DELETE_WINDOW => sub {
-		   $top->withdraw;
-		   return undef;
+  # to take care of waitVariable.
+  $top->protocol(WM_DELETE_WINDOW => sub {
+		   $VARDATA{localReturn} = '';
 		 });
 
-    $top->optionAdd('*Button.BorderWidth' => 1);
-    $top->optionAdd('*Entry.BorderWidth'  => 1);
-
-    my $t = $top->Frame->pack(qw/-fill both -expand 1
-			      -ipadx 10 -ipady 10/);
-
-    $t->gridColumnconfigure(0, -minsize => 50);
-    $t->Label(-text => 'Name',
-	     )->grid(-column => 0,
-		     -row    => 0,
-		     -sticky => 'w');
-    $t->Entry(-textvariable  => \$projectData{name},
-	     )->grid(-column => 1,
-		     -row    => 0,
-		     -columnspan => 4,
-		     -sticky => 'ew');
-    $t->Label(-text => 'Title',
-	     )->grid(-column => 0,
-		     -row    => 1,
-		     -sticky => 'w');
-    $t->Entry(-textvariable  => \$projectData{title},
-	     )->grid(-column => 1,
-		     -row    => 1,
-		     -columnspan => 4,
-		     -sticky => 'ew');
-
-    $t->Label(-text => 'Rows',
-	     )->grid(-column => 0,
-		     -row    => 2,
-		     -sticky => 'w');
-    $t->Entry(-textvariable    => \$projectData{rows},
-	      -justify         => 'right',
-	      -validate        => 'key',
-	      -validatecommand => sub {
-		return 1 unless $_[4] == 1;
-		return 0 unless $_[1] =~ /^\d$/;
-		return 1;
-	      })->grid(-column => 1,
-		       -row    => 2,
-		       -columnspan => 4,
-		       -sticky => 'e');
-    $t->Label(-text => 'Columns',
-	     )->grid(-column => 0,
-		     -row    => 3,
-		     -sticky => 'w');
-    $t->Entry(-textvariable    => \$projectData{cols},
-	      -justify         => 'right',
-	      -validate        => 'key',
-	      -validatecommand => sub {
-		return 1 unless $_[4] == 1;
-		return 0 unless $_[1] =~ /^\d$/;
-		return 1;
-	      })->grid(-column => 1,
-		       -row    => 3,
-		       -columnspan => 4,
-		       -sticky => 'e');
-
-    $t->gridColumnconfigure(0, -pad => 10);
-
-    my $f = $top->Frame(-relief => 'ridge',
-			-borderwidth => 2,
-		       )->pack(qw/-side bottom -fill both
-                               -padx 5 -pady 5/);
-
-    $projectData{okbutton} =
-      $f->Button(-text    => 'Ok',
-		 -command => sub {
-		   $projectData{wait} = 1;
-		 })->pack(qw/-side left -fill both -expand 1/);
-
-    $f->Button(-text    => 'Cancel',
-	       -command => sub {
-		 $projectData{wait} = 0;
-	       })->pack(qw/-side left -fill x -expand 1/);
-
-    $projectData{form} = $top;
-  }
-
-  $projectData{name}   = $name   ? $name   : "Project " . ++$projectData{index};
-  $projectData{title}  = $title  ? $title  : $projectData{name};
-  $projectData{rows}   = $rows || 3;
-  $projectData{cols}   = $cols || 3;
-  $projectData{wait}   = undef;
-
-  centerOnParent($projectData{form}, $mw);
-  $projectData{okbutton}->focus;
-  $projectData{form}->grab;
-  $projectData{form}->waitVariable(\$projectData{wait});
-  $projectData{form}->grabRelease;
-  $projectData{form}->withdraw;
-
-  return undef unless $projectData{wait};
-  return map $projectData{$_}, qw/name title rows cols/;
+  $l->bind('<Double-1>' => [\&initSelectedVar, $top, $l]);
 }
 
-sub centerOnParent {
-  my ($form, $mw) = @_;
+sub initSelectedVar {
+  my $l   = pop;
+  my $top = pop;
+  my $sel = $l->curselection;
 
-  my $x = int 0.5 * ($mw->width  - $form->width);
-  my $y = int 0.5 * ($mw->height - $form->height);
+  return unless defined $sel;
+  my $var = $l->get($sel);
+  $var =~ s/^(.)//;  # the sigil.
+  my $s = $1;
 
-  my $g = $mw->geometry;
-  my ($cx, $cy) = $g =~ /\+(\S+)\+(\S+)/;
+  unless ($VARDATA{initForm}) {
+    my $t = $VARDATA{initForm} = $top->DialogBox(-title   => 'Initialize Variable',
+						 -buttons => [qw/Ok Cancel/],
+						 -popover => $top);
 
-  $x += $cx;
-  $y += $cy;
+    $t->bind('<Return>' => ''); # remove default.
 
-  $form->geometry("+$x+$y");
-  $form->deiconify;
-  $form->raise;
-}
+    # create a frame for each type of variable.
+    {
+      my $f = $VARDATA{initScalarF} = $t->Frame;
+      $f->Label(-text   => 'Enter Value',
+		-anchor => 'w',
+	       )->pack(qw/-fill x/);
 
-my $widgetForm;
-my $widgetName;
-my $widgetNB;
-my $widgetNBwidget;
-my $widgetNBplacement;
-my %widgetConf;
-
-sub widgetConf {
-  my ($class, $mw, $projid,
-      $name, $widget, $force,
-     ) = @_;
-
-  unless ($widgetForm) {
-    my $top = $mw->Toplevel;
-    $top->withdraw;
-    $top->title("Configure Widget - $name");
-    $top->protocol(WM_DELETE_WINDOW => sub {
-		     $top->withdraw;
-		     return undef;
-		   });
-    #$top->resizable(0, 1);
-
-    $widgetForm = $top;
-    $widgetName = $top->Label(-font => [helvetica => 12],
-			      -fg   => 'darkolivegreen',
-			      -bg   => 'white',
-			      -borderwidth => 1,
-			      -relief      => 'ridge',
-			      -pady       => 5,
-			     )->pack(qw/-fill x -padx 5 -pady 5/);
-
-    # create the notebook.
-    $widgetNB          = $widgetForm->NoteBook(
-					       -borderwidth => 1,
-					      )->pack(qw/-fill both -expand 1/);
-    $widgetNBplacement = $widgetNB->add('PLACE',  -label => 'Placement Specific');
-    $widgetNBwidget    = $widgetNB->add('WIDGET', -label => 'Widget Specific');
-
-    # make things a bit nicer
-    for ($widgetNBplacement, $widgetNBwidget) {
-      $_->optionAdd('*Entry.BorderWidth'  => 1);
-      $_->optionAdd('*Button.BorderWidth' => 1);
+      $VARDATA{initScalarV} = $f->Entry->pack(qw/-fill x/);
     }
 
-    # bind for mouse wheel.
-    ZooZ::Generic::BindMouseWheel($widgetForm, sub {
-				    my $r = $widgetNB->raised;
-				    my $s = $r eq 'PLACE' ? $widgetNBplacement : $widgetNBwidget;
-				    ($s->packSlaves)[0];
-				  });
+    {
+      my $f = $VARDATA{initArrayF} = $t->Frame;
+      $f->Label(-text   => 'Enter Values One Per Line',
+		-anchor => 'w',
+	       )->pack(qw/-fill x/);
+      $VARDATA{initArrayV} = $f->Scrolled(Text        =>
+					  -scrollbars => 'e',
+					 )->pack(qw/-fill both -expand 1/);
+    }
+
+    {
+      my $f = $VARDATA{initHashF} = $t->Frame;
+      $f->Label(-anchor  => 'w',
+		-justify => 'left',
+		-text    => <<EOT)->grid(-columnspan => 2);
+Enter key value pairs.
+Each line on the left will define a key and
+each line on the right will define the corresponding value.
+EOT
+  ;
+      $f->Label(-text => 'Keys',
+		-font => 'OptionText',
+	       )->grid(-row => 1, -column => 0, -sticky => 'w');
+      $f->Label(-text => 'Values',
+		-font => 'OptionText',
+	       )->grid(-row => 1, -column => 1, -sticky => 'w');
+      my $t1 = $f->Scrolled(Text        =>
+			    -scrollbars => 'e',
+			    -width      => 20,
+			    -bd         => 1,
+			    -wrap       => 'none',
+			   )->grid(-row => 2, -column => 0);
+      my $t2 = $f->Scrolled(Text        =>
+			    -scrollbars => 'e',
+			    -width      => 20,
+			    -bd         => 1,
+			    -wrap       => 'none',
+			   )->grid(-row => 2, -column => 1);
+
+      # define bindings such that the tab key
+      # jumps between the two texts.
+      # must jump to same location.
+      $VARDATA{initHashK} = $t1->Subwidget('text');
+      $VARDATA{initHashV} = $t2->Subwidget('text');
+      $_->bindtags([$_, 'Tk::Text']) for $VARDATA{initHashK}, $VARDATA{initHashV};
+
+      $VARDATA{initHashK}->bind('<Tab>' => sub {
+				  my $loc = $VARDATA{initHashK}->index('insert');
+				  my $end = $VARDATA{initHashV}->index('end');
+				  $loc =~ s/\..*//;
+				  $end =~ s/\..*//;
+
+				  $VARDATA{initHashV}->insert(end => "\n") for $end .. $loc;
+				  $VARDATA{initHashV}->focus;
+				  $VARDATA{initHashV}->markSet(insert => "$loc.0");
+				  Tk::break;
+				});
+      $VARDATA{initHashV}->bind('<Tab>' => sub {
+				  my $loc = $VARDATA{initHashV}->index('insert');
+				  $loc =~ s/\..*//;
+				  $VARDATA{initHashK}->insert(end => "\n")
+				    if $VARDATA{initHashK}->get("$loc.0") =~ /\S/ &&
+				      $VARDATA{initHashK}->get(($loc+1).".0") !~ /\S/;
+				  $VARDATA{initHashK}->focus;
+				  $VARDATA{initHashK}->markSet(insert => ($loc+1) . ".0");
+				  Tk::break;
+				});
+
+    }
   }
 
-  unless (exists $widgetConf{$projid}{$name}{forms}) {
-    # should create one frame per widget per project.
+  my $f = $s eq "\$" ? 'initScalarF' : $s eq '@' ? 'initArrayF' : 'initHashF';
+
+  # populate with the any old values.
+  {
+    no strict;
+
+    if ($f =~ /Scalar/) {
+      $VARDATA{initScalarV}->delete(qw/0 end/);
+      $VARDATA{initScalarV}->insert(0, $ {"main::$var"});
+    } elsif ($f =~ /Array/) {
+      $VARDATA{initArrayV}->delete(qw/0.0 end/);
+      $VARDATA{initArrayV}->insert(end => "$_\n") for @{"main::$var"};
+    } else { # hash
+      $VARDATA{$_}->delete(qw/0.0 end/) for qw/initHashK initHashV/;
+      for my $k (sort keys %{"main::$var"}) {
+	$VARDATA{initHashK}->insert(end => "$k\n");
+	$VARDATA{initHashV}->insert(end => $ {"main::$var"}{$k} . "\n");
+      }
+    }
+  }
+
+  $VARDATA{$_}->packForget for qw/initScalarF initArrayF initHashF/;
+  $VARDATA{$f}->pack(qw/-fill both -expand 1/);
+
+  my $ans = $VARDATA{initForm}->Show;
+
+  return if $ans eq 'Cancel';
+
+  # set the value.
+  {
+    no strict;
+
+    if ($f =~ /Scalar/) {
+      $ {"main::$var"} = $VARDATA{initScalarV}->get;
+    } elsif ($f =~ /Array/) {
+      @ {"main::$var"} = split /\n/ => $VARDATA{initArrayV}->get(qw/0.0 end/);
+    } else { # hash
+      %{"main::$var"} = ();
+      my @k = split /\n/ => $VARDATA{initHashK}->get(qw/0.0 end/);
+      for my $i (1 .. @k) {
+	my $v = $VARDATA{initHashV}->get("$i.0", "$i.end");
+	$ {"main::$var"}{$k[$i - 1]} = $v;
+      }
+    }
+  }
+}
+
+#########################
+#
+# This should be called as a static sub
+#
+#########################
+
+# IS THIS NECESSARY?
+sub displayForm {
+  my $form = shift;
+
+  return unless exists $TOPLEVEL{$form};
+  my $t = $TOPLEVEL{$form};
+
+  $t->deiconify;
+}
+
+##########################
+#
+# This deletes the form associated with the
+# deleted widget. It also hides the propertis window.
+#
+##########################
+
+sub deleteWidget {
+  my ($class,
+      $projid,
+      $name) = @_;
+
+  $TOPLEVEL{configureWidget}->withdraw;
+  delete $CONFDATA{$projid}{$name};
+}
+
+###########################
+#
+# This method pops up the widget configuration form
+#
+###########################
+
+sub configureWidget {
+  my ($class,    # called as a method.
+      $project,  # actual project widget.
+      $parent,   # parent widget
+      $projid,   # project ID
+      $name,     # Widget name (unique)
+      $widget,   # widget itself (preview, really)
+      $Woptions, # hash of widget options.
+      $Poptions, # hash of placement options.
+      $Eoptions, # hash of extra options.
+      $noforce,  # If window is not viewable, it won't show if this is 1.
+      $scroll,   # Whether widget is scrollable or not.
+     ) = @_;
+
+  $CONFDATA{WidgetName} = $name;
+
+  # create the frame for this widget if we haven't done that before.
+  # should create one frame per widget per project.
+  unless (exists $CONFDATA{FORMS}{$projid}{$name}) {
 
     # frame for widget options.
-    my $f = $widgetNBwidget->Scrolled('Pane',
-				      -sticky     => 'nw',
-				      -scrollbars => 'e',
-				      -gridded => 'xy');
+    my $f = $CONFDATA{NBWIDGET}->Scrolled('Pane',
+					  -sticky     => 'nsew',
+					  -scrollbars => 'e',
+					  -gridded    => 'xy');
+
+    # frame for extra options.
+    my $h = $CONFDATA{NBEXTRA}->Scrolled('Pane',
+					 -sticky     => 'nsew',
+					 -scrollbars => 'e',
+					);
 
     # frame for placement options.
-    my $g = $widgetNBplacement->Scrolled('Pane',
+    my $g = $CONFDATA{NBPLACE}->Scrolled('Pane',
 					 -sticky     => 'nsew',
 					 -scrollbars => 'e',
 					);
 
     # configure the scrollbar's appearance.
-    $_->Subwidget('yscrollbar')->configure(-borderwidth => 1) for $f, $g;
+    $_->Subwidget('yscrollbar')->configure(-borderwidth => 1) for $f, $g, $h;
 
-    $widgetConf{$projid}{$name}{forms} = [$f, $g];
+    # save the frames.
+    $CONFDATA{FORMS}{$projid}{$name} = [$f, $g, $h];
 
     # populate the widget options frame
     {
-      #my @conf = grep @$_ > 2 && !ref($_->[-1]), $widget->configure;
+      my $f = $f->Frame->pack(qw/-side top -fill x/);
       my @conf = grep @$_ > 2, $widget->configure;
-      my $row = 0;
+      my $row  = 0;
       for my $c (@conf) {
 	my $option = $c->[0];
 
 	next if exists $ignoreOptions{$option};
 
+	# default value.
+	$Woptions->{$option} ||= $c->[4];
+
+	###
+	### IMPORTANT: If it's -variable, then reset the value to nothing.
+	###            This prevents a 'panic' crash in ptk.
+	###            Not sure I understand why.
+
+	#print "Default for $option is $c->[4].\n" if $option eq '-variable';
+	$Woptions->{$option} = '' if $option eq '-variable';
+
 	my @extra;   # additional options to be passed to ZooZ::Options::addOptionGrid
 
 	if ($option eq '-font') {
-	  unless ($fontObj) {
-	    $fontObj = new ZooZ::Fonts;
+	  $widget->configure(-font => 'Default');
+	  @extra = ($::FONTOBJ);
 
-	    # create the default object.
-	    my $font = $mw->fontCreate('Default',
-				       map {$_ => $c->[-1]->actual($_)}
-				       qw/-family -size -weight -slant -underline -overstrike/,
-				      );
+	} elsif ($option eq '-command') {
+	  @extra = ($::CALLBACKOBJ);
 
-	    $widget ->configure(-font => 'Default');
-	    $fontObj->add(Default => $font);
-	  }
+	} elsif ($option =~ /^-(?:text)?variable$/) {
+	  @extra = ($::VARREFOBJ);
 
-	  @extra = ($fontObj);
 	} else {
 	  @extra = ();
 	}
 
-	my $label = ZooZ::Options->addOptionGrid($option, $option, $f, $row,
-						 \$widgetConf{$projid}{$name}{widget}{$option},
+	my $label = ZooZ::Options->addOptionGrid($option,
+						 $option,   # might want to change this?
+						 $f,
+						 $row,
+						 0,
+						 \$Woptions->{$option},
 						 @extra,
 						);
 
-	#print "Tying $projid.$name.widget.option to $widget ...\n";
-	tie $widgetConf{$projid}{$name}{widget}{$option},
-	  'ZooZ::TiedVar', $widget, 'configure', $option, $label;
+	# Now tie the variable so we can instantly see the changes.
+	tie $Woptions->{$option} =>
+	  'ZooZ::TiedVar', $widget, $c->[4], 'configure', $option, $label;
 
 	$row++;
       }
+
+      $f->gridColumnconfigure(0,      -weight => 1);
+      #$f->gridRowconfigure   (++$row, -weight => 1);
     }
 
     # populate the placement options frame.
@@ -806,164 +1006,413 @@ sub widgetConf {
 			     )->pack(qw/-side top -fill both -expand 0/);
       my $f3 = $g->Labelframe(-text => "External Padding",
 			     )->pack(qw/-side top -fill both -expand 0/);
+      my $f4 = $g->Labelframe(-text => 'Apply Same Settings to ...',
+			     )->pack(qw/-side top -fill both -expand 0/);
 
       for my $ref ([qw/North n/],
 		   [qw/South s/],
 		   [qw/East  e/],
 		   [qw/West  w/]
 		  ) {
-	$widgetConf{$projid}{$name}{place}{$ref->[1]} = '';
 
-	$f1->Checkbutton(-text     => $ref->[0],
-			 -onvalue  => $ref->[1],
-			 -offvalue => '',
+	$Poptions->{$ref->[1]} ||= '';
+
+	$f1->Checkbutton(-text        => $ref->[0],
+			 -onvalue     => $ref->[1],
+			 -offvalue    => '',
 			 -borderwidth => 1,
-			 -variable => \$widgetConf{$projid}{$name}{place}{$ref->[1]},
-			 -command  => [sub {
-#					 print
-					   $widgetConf{$projid}{$name}{place}{-sticky} =
-					     join '' => @{$widgetConf{$projid}{$name}{place}}{qw/n s e w/};
-				       }],
-			)->pack(qw/-side top -anchor w/);
+			 -variable    => \$Poptions->{$ref->[1]},
+			 -font        => 'OptionText',
+			 -command  => sub {
+			   $Poptions->{-sticky} = join '' => @{$Poptions}{qw/n s e w/};
+			 })->pack(qw/-side top -anchor w/);
       }
 
-      tie $widgetConf{$projid}{$name}{place}{-sticky},
-	'ZooZ::TiedVar', $widget, 'grid', '-sticky';
+      tie $Poptions->{-sticky} =>
+	'ZooZ::TiedVar', $widget, '', 'grid', '-sticky';
 
       my $row = 0;
       for my $ref (['Horizontal', '-ipadx'],
-		   ['Vertical', '-ipady'],
+		   ['Vertical',   '-ipady'],
 		  ) {
 
-	my $label = ZooZ::Options->addOptionGrid
-	  ($ref->[1], $ref->[0], $f2, $row,
-	   \$widgetConf{$projid}{$name}{place}{$ref->[1]},
-	  );
+	$Poptions->{$ref->[1]} ||= 0;
 
-	tie $widgetConf{$projid}{$name}{place}{$ref->[1]},
-	  'ZooZ::TiedVar', $widget, 'grid', $ref->[1], $label;
+	my $label = ZooZ::Options->addOptionGrid(
+						 $ref->[1],
+						 $ref->[0],
+						 $f2,
+						 $row,
+						 0,
+						 \$Poptions->{$ref->[1]},
+						);
+
+	tie $Poptions->{$ref->[1]} =>
+	  'ZooZ::TiedVar', $widget, 0, 'grid', $ref->[1], $label;
 
 	$row++;
       }
 
       $row = 0;
       for my $ref (['Horizontal', '-padx'],
-		   ['Vertical', '-pady'],
+		   ['Vertical',   '-pady'],
 		  ) {
 
-	my $label = ZooZ::Options->addOptionGrid
-	  ($ref->[1], $ref->[0], $f3, $row,
-	   \$widgetConf{$projid}{$name}{place}{$ref->[1]},
-	  );
+	$Poptions->{$ref->[1]} ||= 0;
 
-	tie $widgetConf{$projid}{$name}{place}{$ref->[1]},
-	  'ZooZ::TiedVar', $widget, 'grid', $ref->[1], $label;
+	my $label = ZooZ::Options->addOptionGrid(
+						 $ref->[1],
+						 $ref->[0],
+						 $f3,
+						 $row,
+						 0,
+						 \$Poptions->{$ref->[1]},
+						);
+
+	tie $Poptions->{$ref->[1]} =>
+	  'ZooZ::TiedVar', $widget, 0, 'grid', $ref->[1], $label;
 
 	$row++;
       }
+
+      $_->gridColumnconfigure(0, -weight => 1) for $f2, $f3;
+      $_->gridColumnconfigure(1, -weight => 5) for $f2, $f3;
+
+      my $duplicate = 'All Widgets';
+      $f4->BrowseEntry(
+		       -choices => [
+				    'All Widgets',
+				    'Similar Widgets',
+				    'All Widgets in Same Row',
+				    'All Widgets in Same Column',
+				    'Similar Widgets in Same Row',
+				    'Similar Widgets in Same Column',
+				   ],
+		       -state   => 'readonly',
+		       -variable => \$duplicate,
+		       -disabledforeground => 'black',
+		      )->pack(qw/-side top -fill x -padx 10 -pady 10/);
+      $f4->Button(-text    => 'Apply',
+		  -command => [$project, 'duplicatePlacementOptions', \$duplicate],
+		 )->pack(qw/-fill x/);
     }
+
+    # populate the extra options frame
+    {
+      # First, the scrollbars options.
+      my $f1 = $h->Labelframe(-text => 'Scrollbars',
+			     )->pack(qw/-side top -fill both -expand 0/);
+
+      $Eoptions->{$_} = 0  for qw/SCROLLON HOPTIONAL VOPTIONAL/;
+      $Eoptions->{$_} = '' for qw/HSCROLLLOC VSCROLLLOC/;
+
+      my $scrollCB = $f1->Checkbutton(-text     => 'Enable Scrollbars',
+				      -variable => \$Eoptions->{SCROLLON},
+				      -font     => 'OptionText',
+				     )->pack(qw/-side top/);
+
+      my $f11 = $f1->Frame(-relief      => 'sunken',
+			   -borderwidth => 1,
+			  )->pack(qw/-side top -fill both -expand 1/);
+
+      $f11->Label(-text => 'Horizontal',
+		 )->grid(-column => 0, -row => 1, -sticky => 'w');
+
+      $f11->Checkbutton(-text     => 'Display Only if Needed',
+			-variable => \$Eoptions->{HOPTIONAL},
+			-font     => 'OptionText',
+		       )->grid(-column => 1,
+			       -row    => 1,
+			       -sticky => 'w',
+			       -columnspan => 3,
+			      );
+      $f11->Radiobutton(-text     => 'North',
+			-value    => 'n',
+			-variable => \$Eoptions->{HSCROLLLOC},
+			-font     => 'OptionText',
+		       )->grid(-column => 1,
+			       -row    => 2,
+			       -sticky => 'ew');
+      $f11->Radiobutton(-text     => 'South',
+			-value    => 's',
+			-variable => \$Eoptions->{HSCROLLLOC},
+			-font     => 'OptionText',
+		       )->grid(-column => 2,
+			       -row    => 2,
+			       -sticky => 'ew');
+      $f11->Radiobutton(-text     => 'None',
+			-value    => '',
+			-variable => \$Eoptions->{HSCROLLLOC},
+			-font     => 'OptionText',
+		       )->grid(-column => 3,
+			       -row    => 2,
+			       -sticky => 'ew');
+
+      $f11->Label(-text => 'Vertical',
+		 )->grid(-column => 0, -row => 3, -sticky => 'w');
+
+      $f11->Checkbutton(-text     => 'Display Only if Needed',
+			-variable => \$Eoptions->{VOPTIONAL},
+			-font     => 'OptionText',
+		       )->grid(-column => 1,
+			       -row    => 3,
+			       -sticky => 'w',
+			       -columnspan => 3,
+			      );
+      $f11->Radiobutton(-text     => 'East',
+			-value    => 'e',
+			-variable => \$Eoptions->{VSCROLLLOC},
+			-font     => 'OptionText',
+		       )->grid(-column => 1,
+			       -row    => 4,
+			       -sticky => 'ew');
+      $f11->Radiobutton(-text     => 'West',
+			-value    => 'w',
+			-variable => \$Eoptions->{VSCROLLLOC},
+			-font     => 'OptionText',
+		       )->grid(-column => 2,
+			       -row    => 4,
+			       -sticky => 'ew');
+      $f11->Radiobutton(-text     => 'None',
+			-value    => '',
+			-variable => \$Eoptions->{VSCROLLLOC},
+			-font     => 'OptionText',
+		       )->grid(-column => 3,
+			       -row    => 4,
+			       -sticky => 'ew');
+
+      $f11->gridColumnconfigure(0, -weight => 1);
+
+      # start with all disabled.
+      $_->configure(-state => 'disabled') for $f11->children;
+
+      # Tie the variables.
+      # Whenever the SCROLLON value changes, enable/disable the options.
+      Tie::Watch->new(
+		      -variable => \$Eoptions->{SCROLLON},
+		      -store    => [\&scrollState, $Eoptions, $widget, $f11],
+		     );
+
+      # Show appropriate scrollbars when chosen.
+      Tie::Watch->new(
+		      -variable => \$Eoptions->{HSCROLLLOC},
+		      -store    => [\&addScrolls, $Eoptions, $widget],
+		     );
+
+      Tie::Watch->new(
+		      -variable => \$Eoptions->{VSCROLLLOC},
+		      -store    => [\&addScrolls, $Eoptions, $widget],
+		     );
+
+      # is it scrollable?
+      $scrollCB->configure(-state => 'disabled') unless $scroll;
+    }
+
   }
 
-  #return if !$force && $widgetForm->state ne 'normal';
-  $widgetName->configure(-text => "Configuring $name");
+  # configure the window title
+  my $top = $TOPLEVEL{configureWidget};
+  $top->title("Configure Widget - Project $projid");
 
-  # let's update the variables with the current values.
-  my @conf = grep @$_ > 2 && !exists $ignoreOptions{$_->[0]}, $widget->configure;
-  $widgetConf{$projid}{$name}{widget}{$_->[0]} = $_->[4] for @conf;
+  return if $noforce && !$top->ismapped;
 
   # display the correct frames in the notebook.
-  my $ref = $widgetConf{$projid}{$name}{forms};
-  $_->packForget for map $_->packSlaves, $widgetNBplacement, $widgetNBwidget;
+  $_->packForget for map $_->packSlaves => (
+					    $CONFDATA{NBPLACE},
+					    $CONFDATA{NBWIDGET},
+					    $CONFDATA{NBEXTRA}
+					   );
 
-  $_->pack(qw/-fill both -expand 1/) for @$ref;
+  $_->pack(qw/-fill both -expand 1/) for @{$CONFDATA{FORMS}{$projid}{$name}};
 
-  return unless $force;
-
-  # pop-up the window.
-  $widgetForm->title("Configure Widget - Project $projid - $name");
-  $widgetForm->deiconify;
-  $widgetForm->waitVisibility;
-  $widgetForm->geometry($widgetForm->reqwidth . 'x500');
-  $widgetForm->raise;
+  # pop-up the window if we have to.
+  unless ($top->ismapped) {
+    $top->deiconify;
+    $top->geometry($top->reqwidth . 'x500');
+  }
+  $top->raise;
 }
 
-# form to configure the row or column.
-# supplies options for minsize/weight/padding
-my $rowColConfForm;
-my $rowColConfTitle;
-my %rowColConf;
+sub scrollState {
+  my ($self, $val) = @_;
 
-sub rowColConf {
-  my ($class, $mw, $projid, $hier, $widget,
-      $rowORcol, $index,
-     ) = @_;
+  $self->Store($val);
 
-  unless ($rowColConfForm) {
-    my $top = $mw->Toplevel;
-    $top->withdraw;
-    #$top->title("Configure Widget - $name");
-    $top->protocol(WM_DELETE_WINDOW => sub {
-		     $top->withdraw;
-		     return undef;
-		   });
-    $top->resizable(0, 1);
+  my $args = $self->Args('-store');
+  my $o    = shift @$args;
+  my $w    = shift @$args;
 
-    $rowColConfForm = $top;
+  $_->configure(-state => $val ? 'normal' : 'disabled')
+    for map $_->children => @$args;
 
-    $rowColConfTitle =
-      $top->Label(-font => [helvetica => 12],
-		  -fg   => 'darkolivegreen',
-		  -bg   => 'white',
-		  -borderwidth => 1,
-		  -relief      => 'ridge',
-		  -pady       => 5,
-		 );
-#		  )->pack(qw/-fill both -expand 1/);
-#		  )->grid(-row        => 0,
-#			  -column     => 0,
-#			  -columnspan => 2,
-#			  -sticky     => 'ew',
-#			 )
+  $w->configure(-scrollbars => $val ? "$o->{HSCROLLLOC}$o->{VSCROLLLOC}" : '');
+}
+
+sub addScrolls {
+  my ($self, $val) = @_;
+
+  $self->Store($val);
+  my $args = $self->Args('-store');
+
+  my ($o, $w) = @$args;
+  my $h = $o->{HSCROLLLOC};
+  my $v = $o->{VSCROLLLOC};
+
+  $w->configure(-scrollbars => "$h$v");
+}
+
+sub chooseFont {
+  my ($class, $ref) = @_;
+
+  $FONTDATA{localReturn} = '';
+  $TOPLEVEL{chooseFont}->deiconify;
+  $TOPLEVEL{chooseFont}->grab;
+  $TOPLEVEL{chooseFont}->waitVariable(\$FONTDATA{localReturn});
+  $TOPLEVEL{chooseFont}->grabRelease;
+  $TOPLEVEL{chooseFont}->withdraw;
+
+  return $FONTDATA{localReturn};
+}
+
+sub chooseVar {
+  my ($class, $ref) = @_;
+
+  # update the list.
+  {
+    $VARDATA{list}->delete(qw/0 end/);
+    $VARDATA{list}->insert(end => $_) for $::VARREFOBJ->listAll;
   }
 
-  unless (exists $rowColConf{$projid}{$hier}{$rowORcol}[$index]) {
-    my $f = $rowColConfForm->Frame;
+  $VARDATA {localReturn} = '';
+  $TOPLEVEL{chooseVarRef}->deiconify;
+  $TOPLEVEL{chooseVarRef}->grab;
+  $TOPLEVEL{chooseVarRef}->waitVariable(\$VARDATA{localReturn});
+  $TOPLEVEL{chooseVarRef}->grabRelease;
+  $TOPLEVEL{chooseVarRef}->withdraw;
+
+  return $VARDATA{localReturn};
+}
+
+sub chooseCallback {
+  my ($class, $ref) = @_;
+
+  # update the list.
+  {
+    $CBDATA{list}->delete(qw/0 end/);
+    $CBDATA{list}->insert(end => $_) for $::CALLBACKOBJ->listAll;
+  }
+
+  $CBDATA  {localReturn} = '';
+  $TOPLEVEL{chooseCallback}->deiconify;
+  $TOPLEVEL{chooseCallback}->grab;
+  $TOPLEVEL{chooseCallback}->waitVariable(\$CBDATA{localReturn});
+  $TOPLEVEL{chooseCallback}->grabRelease;
+  $TOPLEVEL{chooseCallback}->withdraw;
+
+  return $CBDATA{localReturn};
+}
+
+sub configureSampleFont {
+  my $sample = shift;
+
+  $sample->configure(
+		     -font => [$FONTDATA{family},
+			       $FONTDATA{size},
+			       $FONTDATA{weight},
+			       $FONTDATA{slant},
+			       $FONTDATA{underline}  ? 'underline'  : (),
+			       $FONTDATA{overstrike} ? 'overstrike' : ()],
+		    );
+
+}
+
+sub cancelForm {
+  my $h = shift;
+
+  $h->{localReturn} = '';
+}
+
+sub cancelAllForms {
+  cancelForm($_) for \%VARDATA, \%CBDATA, \%FONTDATA;
+}
+
+sub setup_configureRowCol {
+#  my ($class, $mw, $projid, $hier, $widget,
+#      $rowORcol, $index,
+#     ) = @_;
+
+  my ($class, $top) = @_;
+
+  #$top->resizable(0, 1);
+  $ROWCOLDATA{title} =
+    $top->Label(-font   => [helvetica => 12],
+		-fg     => 'darkolivegreen',
+		-bg     => 'white',
+		-bd     => 1,
+		-relief => 'ridge',
+		-pady   => 5,
+	       );
+}
+
+sub configureRowCol {
+  my ($class,
+      $projid,    # project id.
+      $hier,      # current hierarchy
+      $widget,    # preview top.
+      $rowORcol,  # whether 'row' or 'col'
+      $index,     # row or col number.
+      $options,   # options hash
+     ) = @_;
+
+  unless (exists $ROWCOLDATA{$projid}{$hier}{$rowORcol}[$index]) {
+    my $f = $TOPLEVEL{configureRowCol}->Frame;
 
     # populate it.
-    my $row = 1;
+    my $row = 0;
     for my $ref (
-		 ['Extra Space Greediness', '-weight'],
-		 ['Minimum Size',           '-minsize'],
-		 ['Extra Padding',          '-pad'],
+		 ['Extra Space Greediness', '-weight',  0],
+		 ['Minimum Size',           '-minsize', 0],
+		 ['Extra Padding',          '-pad',     0],
 		) {
 
-      my $dummy;
+      #my $dummy;
+      $options->{$ref->[1]} ||= $ref->[2];
+
       my $label = ZooZ::Options->addOptionGrid($ref->[1],
 					       $ref->[0],
 					       $f,
 					       $row,
-					       \$dummy,
+					       0,
+					       #$ROWCOLDATA{$projid}{$hier},
+					       #\$dummy,
+					       \$options->{$ref->[1]},
 					      );
 
-      tie $dummy, 'ZooZ::TiedVar', $widget,
+      tie $options->{$ref->[1]}, 'ZooZ::TiedVar', $widget, $ref->[2],
 	($rowORcol eq 'row' ? 'gridRowconfigure' :
 	 'gridColumnconfigure'),
 	   $ref->[1], $label, [$index];
       $row++;
     }
 
-    $rowColConf{$projid}{$hier}{$rowORcol}[$index] = $f;
+    $ROWCOLDATA{$projid}{$hier}{$rowORcol}[$index] = $f;
   }
 
-  $_->packForget for $rowColConfForm->packSlaves;
-  $rowColConfTitle->pack(qw/-fill both -expand 1/);
-  $rowColConf{$projid}{$hier}{$rowORcol}[$index]->pack(qw/-fill both -expand 1/);
+  my $top = $TOPLEVEL{configureRowCol};
+  $_->packForget for $top->packSlaves;
 
-  $rowColConfForm ->title("Configure \u$rowORcol $index - Project $projid");
-  $rowColConfTitle->configure(-text => "Configuring \u$rowORcol $index");
+  # fix and pack the title.
+  $ROWCOLDATA{title}->pack(qw/-fill both -expand 1/);
+  $ROWCOLDATA{title}->configure(-text => "Configuring $hier \u$rowORcol $index");
 
-  $rowColConfForm->deiconify;
-  $rowColConfForm->raise;
+  # now pack the form.
+  $ROWCOLDATA{$projid}{$hier}{$rowORcol}[$index]->pack(qw/-fill both -expand 1/);
+  $top->title("Configure \u$rowORcol $index - Project $projid");
+
+  $top->deiconify;
+  $top->update;
+  $top->geometry($top->reqwidth . 'x' . $top->reqheight);
+  $top->raise;
 }
 
 1;
