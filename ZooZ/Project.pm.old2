@@ -1,0 +1,542 @@
+
+package ZooZ::Project;
+
+use strict;
+use Tk qw/:colors/;
+
+#############
+#
+# Global variables
+#
+#############
+my $gridW = 90;     # width of each grid.
+my $gridH = 50;     # height of each grid.
+my $XoffS = 30;     # X offset of first grid.
+my $YoffS = 30;     # Y offset of first grid.
+
+my $maxR  = 100;    # max number of rows.
+my $maxC  = 100;    # max number or cols.
+
+##############
+#
+# Constructor
+#
+##############
+
+sub new {
+  my ($self, %args) = @_;
+
+  my $class = ref($self) || $self;
+
+  my $obj = bless {
+		   PROJID   => $args{-id},
+		   PROJNAME => $args{-name},
+		   PARENT   => $args{-parent},
+		   TITLE    => $args{-title},
+		   ICONS    => $args{-icons},
+		   SELECTED => undef, # currently selected widget
+		   MOVABLE  => undef, # currently movable widget
+		   IDS      => {},    # widget ids to use when creating unique names.
+		  } => $class;
+
+  $obj->_createGrid;
+  $obj->_defineBindings;
+
+  return $obj;
+}
+
+###########
+#
+# This subroutine creates the grid canvas along with other
+# canvas objects.
+#
+###########
+
+sub _createGrid {
+  my $self = shift;
+
+  # create the canvas.
+  my $cv = $self->{CV} = $self->{PARENT}->Canvas(-bg      => 'white',
+						 -confine => 1,
+						)->pack(qw/-side left
+							-fill both
+							-expand 1/);
+
+  # draw the grid.
+  my $x = $XoffS;
+  my $y = $YoffS;
+
+  for my $r (0 .. $maxR - 1) {
+    for my $c (0 .. $maxC - 1) {
+      $self->{GRID}[$r][$c]{ID} =
+	$cv->createRectangle($x, $y,
+			     $x + $gridW, $y + $gridH,
+			     -stipple => 'transparent',
+			     -fill    => 'white',
+			     -outline => 'grey',
+			     -tags    => ['GRID', "GRID_$ {r}_$ {c}"]
+			    );
+
+      $x += $gridW;
+    }
+
+    $x = $XoffS;
+    $y += $gridH;
+  }
+
+  { # Add the row/col numbers.
+    my $x = $XoffS / 2;
+    my $y = $YoffS + $gridH / 2;
+
+    for my $r (0 .. $maxR - 1) {
+      $cv->createText($x, $y,
+		      -text => $r,
+		      -font => 'Row/Col Num',
+		      -fill => 'grey25',
+		     );
+      $y += $gridH;
+    }
+
+    $x = $XoffS + $gridW / 2;
+    $y = $YoffS / 2;
+
+    for my $c (0 .. $maxC - 1) {
+      $cv->createText($x, $y,
+		      -text => $c,
+		      -font => 'Row/Col Num',
+		      -fill => 'grey25',
+		     );
+      $x += $gridW;
+    }
+  }
+
+  $cv->configure(-scrollregion => [0, 0, ($cv->bbox('all'))[2, 3]]);
+
+  # create a dummy outline rectangle to display when moving widgets.
+  $self->{WIDGET_OUTLINE} = $cv->createRectangle(0, 0, 0, 0,
+						 -width   => 2,
+						 -outline => 'grey12',
+						 -fill    => 'white',
+						 -stipple => 'transparent',
+						 -state   => 'hidden',
+						);
+
+#  $self->{$_} = $cv->createLine(-1, -1, -1, -1,
+#				-fill  => 'darkgreen',
+#				-arrow => 'last',
+#				-width => 2,
+#			       ) for qw/EXPAND_H EXPAND_V/;
+
+#  $self->{$_} = $cv->createLine(-1, -1, -1, -1,
+#				-fill  => 'darkgreen',
+#				-arrow => 'first',
+#				-width => 2,
+#			       ) for qw/CONTRACT_H CONTRACT_V/;
+
+  # create the expand/contract buttons.
+  my @opts = (
+	      -highlightthickness => 0,
+	      -borderwidth        => 1,
+	      -pady               => 0,
+	      -relief             => 'raised',
+	     );
+
+  if (0) {
+  $self->{$_->[0]} = $cv->createWindow(0, 0,
+				       -width   => $_->[2],
+				       -height  => $_->[3],
+				       -state   => 'hidden',
+				       -window  => $cv->Button(-bitmap => $_->[1],
+							       @opts,
+							      ),
+				      )
+    for (
+	 [qw/TOP_RESIZE_DOWN down_size/, $gridW / 2, 10],
+	 [qw/BOT_RESIZE_DOWN down_size/, $gridW / 2, 10],
+
+	 [qw/TOP_RESIZE_UP up_size/, $gridW / 2, 10],
+	 [qw/BOT_RESIZE_UP up_size/, $gridW / 2, 10],
+
+	 [qw/LEFT_RESIZE_RIGHT  right_size/, 10, $gridH / 2],
+	 [qw/RIGHT_RESIZE_RIGHT right_size/, 10, $gridH / 2],
+
+	 [qw/LEFT_RESIZE_LEFT  left_size/, 10, $gridH / 2],
+	 [qw/RIGHT_RESIZE_LEFT left_size/, 10, $gridH / 2],
+
+	);
+  }
+
+  $self->{$_->[0]} = $cv->Label(
+				-bitmap => $_->[2],
+				-bg     => $_->[1],
+			       )
+    for (
+	 [qw/CONTRACT_H white leftArrow /],
+	 [qw/EXPAND_H   white rightArrow/],
+	 [qw/CONTRACT_V white upArrow   /],
+	 [qw/EXPAND_V   white downArrow /],
+	);
+}
+
+##########
+#
+# defines all the default bindings for interactivity.
+#
+##########
+
+sub _defineBindings {
+  my $self = shift;
+
+  my $cv = $self->{CV};
+
+  $cv->CanvasBind('<1>' => [$self => 'unselectCurrentWidget']);
+
+  #$cv->CanvasBind('<<DropWidget>>' => \&dropWidget);
+}
+
+#############
+#
+# called when the user clicks on the canvas to drop a new widget.
+# For new widgets, this is called directly from ZooZ.pl
+#
+#############
+
+sub dropWidget {
+  my $self = shift;
+
+  my $cv = $self->{CV};
+
+  # check where the click happened.
+  my ($id, $row, $col) = $self->_getGridClick;
+
+  # didn't click on anything useful.
+  return undef unless defined $id;
+
+  my $ref = $self->{GRID}[$row][$col];
+
+  # is it an empty location?
+  return undef if $ref->{WIDGET};
+
+  # it is empty. Fill it up.
+  $ref->{WIDGET}= $::SELECTED_W;
+
+  # create a new and uniqe name.
+  my $name = $::SELECTED_W . ++$self->{IDS}{$::SELECTED_W};
+
+  # get coordinates of new window.
+  my @c = $cv->coords($id);
+  my $w = $c[2] - $c[0];
+  my $h = $c[3] - $c[1];
+
+  # create the label and window.
+  my $frame = $cv->Frame(-relief => 'raised', -borderwidth => 1);
+  my $label = $frame->Label->pack(qw/-fill both -expand 1/);
+
+  $ref->{WINDOW} = $cv->createWindow($c[0] + $w / 2,
+				     $c[1] + $h / 2,
+				     -window => $frame,
+				     -width  => $w,
+				     -height => $h,
+				    );
+
+  $ref ->{NAME}               = $name;
+  $ref ->{LABEL}              = $label;
+  $ref ->{LABFRAME}           = $frame;
+  $self->{LABEL2GRID}{$label} = [$row, $col];
+
+  # create the compound image to place in the label.
+  my $compound = $label->Compound;
+  $label   ->configure(-image => $compound);
+  if (exists $self->{ICONS}{lc $::SELECTED_W}) {
+    $compound->Image(-image => $self->{ICONS}{lc $::SELECTED_W});
+  } else {
+    $compound->Bitmap(-bitmap => 'error');#, -background => 'cornflowerblue');
+  }
+  $compound->Line;
+  $compound->Text(-text => $name,
+		  -font => 'WidgetName',
+		 );
+
+  $self->_bindWidgetLabel($label);
+  $self->selectWidget    ($label);
+
+  # must update the preview window.
+
+  return 1;
+}
+
+#############
+#
+# This sub sets up the bindings for moving a widget around.
+#
+#############
+
+sub _bindWidgetLabel {
+  my ($self, $lab) = @_;
+
+  #my $lab = $self->{GRID}[$row][$col]{LABEL};
+
+  $lab->bind('<1>'                => [$self, 'selectWidget', $lab]);
+  $lab->bind('<B1-Motion>'        => [$self, 'dragWidget',   $lab]);
+  $lab->bind('<B1-ButtonRelease>' => [$self, 'moveWidget',   $lab]);
+}
+
+#####################
+#
+# This sub is called when a user ends the dragging of
+# an already existing widget (dropping it) over the canvas.
+#
+#####################
+
+sub moveWidget {
+  my ($self, $lab) = @_;
+
+  return unless $self->{MOVABLE};
+  my $cv = $self->{CV};
+
+  $cv->itemconfigure($self->{WIDGET_OUTLINE},
+		     -state => 'hidden',
+		    );
+
+  # where did we release the button?
+  my ($id, $row, $col) = $self->_getGridClick;
+
+  # didn't click on anything useful.
+  return undef unless defined $id;
+
+  my $ref = $self->{GRID}[$row][$col];
+
+  # is it an empty location?
+  return undef if $ref->{WIDGET};
+
+  # empty. re-position the widget.
+  # get the old location first.
+  my ($oldR, $oldC) = @{$self->{LABEL2GRID}{$lab}};
+
+  # now swap logically.
+  $self->{GRID}[$row] [$col]  = $self->{GRID}[$oldR][$oldC];
+  $self->{GRID}[$oldR][$oldC] = {};
+  $self->{LABEL2GRID}{$lab}   = [$row, $col];
+
+  # and swap physically.
+  my @c = $cv->coords($id);
+  my $w = $c[2] - $c[0];
+  my $h = $c[3] - $c[1];
+
+  $cv->coords($self->{GRID}[$row][$col]{WINDOW},
+	      $c[0] + $w / 2,
+	      $c[1] + $h / 2,
+	     );
+
+  # update the resize buttons.
+  $self->_showResizeButtons;
+
+  # must update the preview window.
+}
+
+###################
+#
+# This sub is called when the user drags an already existing
+# widget over the canvas with the intention of moving it.
+#
+###################
+
+sub dragWidget {
+  my ($self, $lab) = @_;
+
+  return unless $self->{MOVABLE};
+  my $cv = $self->{CV};
+
+  my $x = $cv->canvasx($cv->pointerx - $cv->rootx);
+  my $y = $cv->canvasy($cv->pointery - $cv->rooty);
+
+  $cv->itemconfigure($self->{WIDGET_OUTLINE},
+		     -state => 'normal',
+		    );
+
+  $cv->coords($self->{WIDGET_OUTLINE} =>
+	      $x - $gridW / 2,
+	      $y - $gridH / 2,
+	      $x + $gridW / 2,
+	      $y + $gridH / 2,
+	     );
+}
+
+#############
+#
+# This sub is called when a user selects a widget by clicking on it.
+#
+#############
+
+sub selectWidget {
+  my ($self, $lab) = @_;
+
+  $self->unselectCurrentWidget;
+
+  $lab->configure(-bg => 'cornflowerblue');
+  $self->{SELECTED} = $lab;
+  $self->{MOVABLE}  = $lab;
+
+  # must show the resize buttons.
+  $self->_showResizeButtons;
+}
+
+sub unselectCurrentWidget {
+  my $self = shift;
+
+  my $lab  = $self->{SELECTED};
+  $lab or return;
+
+  $lab->configure(-bg => NORMAL_BG);
+  $self->{SELECTED} = '';
+  $self->{MOVABLE}  = '';
+
+  # must hide the resize buttons.
+  $self->_hideResizeButtons;
+}
+
+#############
+#
+# this sub finds out the grid location we clicked on.
+#
+#############
+
+sub _getGridClick {
+  my $self = shift;
+  my $cv   = $self->{CV};
+
+  my $x  = $cv->pointerx - $cv->rootx;
+  my $y  = $cv->pointery - $cv->rooty;
+
+  for my $id ($cv->find(overlapping => $x, $y, $x, $y)) {
+    my @t  = $cv->gettags($id);
+
+    my ($r, $c) = "@t" =~ /\bGRID_(\d+)_(\d+)\b/;
+    defined $r or next;
+
+    return ($id, $r, $c);
+  }
+
+  return undef;
+}
+
+sub _showResizeButtons {
+  my $self = shift;
+
+  my $cv = $self->{CV};
+
+  # get the frame where the label is.
+  my ($r, $c) = @{$self->{LABEL2GRID}{$self->{SELECTED}}};
+  my $frame = $self->{GRID}[$r][$c]{LABFRAME};
+
+  # place the buttons in $frame.
+  $self->{EXPAND_H}  ->place(-in => $frame,
+			     -x  => $gridW - 20,
+			     -y  => 5,
+			    );
+  $self->{CONTRACT_H}->place(-in => $frame,
+			     -x  => $gridW - 20,
+			     -y  => 15,
+			    );
+
+  $self->{EXPAND_V}  ->place(-in => $frame,
+			     -x  => 5,
+			     -y  => 5,
+			    );
+  $self->{CONTRACT_V}->place(-in => $frame,
+			     -x  => 15,
+			     -y  => 5,
+			    );
+
+  $self->{$_}->raise for qw/EXPAND_H CONTRACT_H EXPAND_V CONTRACT_V/;
+}
+
+sub _showResizeButtons_old {
+  my $self = shift;
+
+  my $cv = $self->{CV};
+
+  # get the coords of the window.
+  my ($r, $c) = @{$self->{LABEL2GRID}{$self->{SELECTED}}};
+  my @c  = $cv->bbox($self->{GRID}[$r][$c]{WINDOW});
+
+  $cv->coords($self->{TOP_RESIZE_UP},
+	      $c[0] + $gridW / 4,
+	      $c[1] - 5);
+  $cv->coords($self->{TOP_RESIZE_DOWN},
+	      $c[0] + $gridW * 3/4,
+	      $c[1] - 5);
+
+  $cv->coords($self->{BOT_RESIZE_DOWN},
+	      $c[0] + $gridW / 4,
+	      $c[3] + 5);
+  $cv->coords($self->{BOT_RESIZE_UP},
+	      $c[0] + $gridW * 3/4,
+	      $c[3] + 5);
+
+  $cv->coords($self->{LEFT_RESIZE_LEFT},
+	      $c[0] - 5,
+	      $c[1] + $gridH / 4,
+	     );
+  $cv->coords($self->{LEFT_RESIZE_RIGHT},
+	      $c[0] - 5,
+	      $c[1] + $gridH * 3/4,
+	     );
+
+  $cv->coords($self->{RIGHT_RESIZE_RIGHT},
+	      $c[2] + 5,
+	      $c[1] + $gridH / 4,
+	     );
+  $cv->coords($self->{RIGHT_RESIZE_LEFT},
+	      $c[2] + 5,
+	      $c[1] + $gridH * 3/4,
+	     );
+
+  $cv->itemconfigure($self->{$_},
+		     -state => 'normal') for qw(TOP_RESIZE_UP
+						TOP_RESIZE_DOWN
+						BOT_RESIZE_UP
+						BOT_RESIZE_DOWN
+						LEFT_RESIZE_LEFT
+						LEFT_RESIZE_RIGHT
+						RIGHT_RESIZE_LEFT
+						RIGHT_RESIZE_RIGHT
+					       );
+}
+
+sub _hideResizeButtons {
+  my $self = shift;
+
+  $self->{$_}->placeForget for qw/EXPAND_H CONTRACT_H EXPAND_V CONTRACT_V/;
+
+#  $self->{CV}->coords($self->{$_}, -50, -50) for qw(
+#						    TOP_RESIZE_UP
+#						    TOP_RESIZE_DOWN
+#						    BOT_RESIZE_UP
+#						    BOT_RESIZE_DOWN
+#						    LEFT_RESIZE_LEFT
+#						    LEFT_RESIZE_RIGHT
+#						    RIGHT_RESIZE_LEFT
+#						    RIGHT_RESIZE_RIGHT
+#						   );
+}
+
+##############################
+#
+# Data structures:
+#
+# $self->{CV}                          = canvas object.
+#
+# $self->{GRID}[$row][$column]{ID}       = canvas ID of rectangle.
+# $self->{GRID}[$row][$column]{WIDGET}   = Type of widget in that grid (if any).
+# $self->{GRID}[$row][$column]{WINDOW}   = ID of canvas window object (if any).
+# $self->{GRID}[$row][$column]{LABEL}    = Label of widget (what is inside the window)
+# $self->{GRID}[$row][$column]{NAME}     = Name of widget (unique)
+# $self->{GRID}[$row][$column]{LABFRAME} = frame widget where LABEL is
+#
+# $self->{LABEL2GRID}{$label}          = [row, col] of labels of widgets
+#
+# $self->{WIDGET_OUTLINE}              = ID of dummy rectangle when moving widgets.
+#
+# $self->{.*_RESIZE_.*}                = IDs of resize buttons
+#

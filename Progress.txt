@@ -1,0 +1,12 @@
+TODO:
+-----
+- Support for user-defined non-standard widgets.
+  Users should be able to "register" their own widgets.
+- Saving/Loading projects.
+- Deleting/Closing projects.
+- Dumping valid Perl code.
+- Undo.
+- ZooZ application icon.
+- More standard widget icons.
+- Support for special widgets like Notebooks/Scrollbars/Adjuster.
+- Proper support for all widget configuration options like -command, -textvariable, etc ..
